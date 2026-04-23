@@ -1,0 +1,5 @@
+transformers==4.57.3
+datasets==3.6.0
+evaluation==0.4.1
+modelscope==1.33.0
+flash-attn==2.7.3
