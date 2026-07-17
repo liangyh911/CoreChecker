@@ -34,37 +34,16 @@
 
 #pragma once
 
-#include <iostream>
-
 #include "cutlass/cutlass.h"
 #include "cutlass/numeric_types.h"
 #include "cutlass/arch/arch.h"
 #include "cutlass/device_kernel.h"
 
 #include "cutlass/gemm/threadblock/threadblock_swizzle.h"
-#include "cutlass/gemm/kernel/gemm_batched.h"
+#include "cutlass/gemm/kernel/gemm_batched_std_abft.h"
 
 #include "cutlass/gemm/kernel/default_gemm.h"
 #include "cutlass/gemm/device/default_gemm_configuration.h"
-
-#define checkCudaErrors(val) check ( (val), #val, __FILE__, __LINE__ )
-template< typename T >
-void check(T result, char const *const func, const char *const file, int const line)
-{
-    if (result)
-    {
-        fprintf(stderr, "CUDA error at %s:%d code=%d(%s) \"%s\" \n", file, line, static_cast<unsigned int>(result), cudaGetErrorString(result), func);
-        cudaDeviceReset();
-        exit(EXIT_FAILURE);
-    }
-}
-
-#include <chrono>
-#include <cmath>
-#include <string>
-#include <fstream>
-#include <filesystem>
-namespace fs = std::filesystem;
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -185,8 +164,6 @@ namespace device {
     >
     class Gemm;
 */
-// __device__ int *SM_check_res;
-
 template <
     /// Element type for A matrix operand
     typename ElementA_,
@@ -241,7 +218,7 @@ template <
         OperatorClass_, ArchTag_, ElementA_, ElementB_, ElementC_,
         ElementAccumulator_>::Operator
 >
-class GemmBatched {
+class GemmBatchedStdABFT {
  public:
 
   using ElementA = ElementA_;
@@ -291,7 +268,7 @@ class GemmBatched {
     Operator
   >::GemmKernel;
 
-  using GemmKernel = kernel::GemmBatched<typename DefaultGemmKernel::Mma, typename DefaultGemmKernel::Epilogue, ThreadblockSwizzle>;
+  using GemmKernel = kernel::GemmBatchedStdABFT<typename DefaultGemmKernel::Mma, typename DefaultGemmKernel::Epilogue, ThreadblockSwizzle>;
 
   /// Argument structure
   struct Arguments {
@@ -356,7 +333,7 @@ private:
 public:
 
   /// Constructs the GEMM.
-  GemmBatched() { }
+  GemmBatchedStdABFT() { }
 
   /// Determines whether the GEMM can execute the given problem.
   static Status can_implement(Arguments const &args) {
@@ -437,319 +414,63 @@ public:
   }
 
   /// Runs the kernel using initialized state.
-  Status run(int if_split_phase, bool adaptive_mod, char transb, bool DEBUG, cudaStream_t stream = nullptr) {
-
-    // Preparing time
-    // cudaEvent_t abft_prepare_start, abft_prepare_end;
-    // std::chrono::high_resolution_clock::time_point start_malloc;
-    // if(DEBUG){
-    //   // cudaEventCreate(&abft_prepare_start,0);
-    //   // cudaEventCreate(&abft_prepare_end,0);
-    //   // cudaEventRecord(abft_prepare_start, stream);
-    //   start_malloc = std::chrono::high_resolution_clock::now();
-    // }
+  Status run(bool DEBUG, cudaStream_t stream = nullptr) {
 
     fs::path destinationFile, fullPath;
-    float t1;
     const char* homeDir = nullptr;
     homeDir = getenv("HOME");
     fs::path homePath(homeDir);
 
+    char *job_id = getenv("SLURM_JOB_ID");
     int gpu_dev = -1;
     cudaGetDevice(&gpu_dev);
 
-    cudaDeviceProp prop;
-    cudaGetDeviceProperties(&prop, gpu_dev);
-    int num_sms = prop.multiProcessorCount;
     // int num_sms = 132;
-    // printf("SM count: %d\n", num_sms);
+    // int *SM_check_res_1;
+    // cudaMalloc((void**)&SM_check_res_1, num_sms * sizeof(int));
+    // cudaMemset(SM_check_res_1, 0, num_sms * sizeof(int));
 
     ThreadblockSwizzle threadblock_swizzle;
 
-    // dim3 grid = threadblock_swizzle.get_grid_shape(params_.grid_tiled_shape);
+    dim3 grid = threadblock_swizzle.get_grid_shape(params_.grid_tiled_shape);
     dim3 block(GemmKernel::kThreadCount, 1, 1);
-    dim3 grid_gemm(num_sms,1,1);
-
-    dim3 grid_updatechk(num_sms,1,1);
-    dim3 block_updatechk(1024,1, 1);
-    
-    cudaStream_t stream_colchk;
-    // cudaStreamCreate(&stream_main);
-    cudaStreamCreate(&stream_colchk);
-
-    // bool deBug = false;
-    // // int iterations = 1;
-    cudaEvent_t start, stop;
-    cudaEvent_t start_2, stop_2;
-    
-    if(DEBUG){
-      cudaEventCreate(&start);
-      cudaEventCreate(&stop);
-
-      cudaEventCreate(&start_2);
-      cudaEventCreate(&stop_2);
-    }
-    float t_gemm = 0, t_chksum = 0, t_check = 0;
-
-    int *SM_check_res;
-    cudaMalloc((void**)&SM_check_res, num_sms * sizeof(int));
-    cudaMemset(SM_check_res, 0, num_sms * sizeof(int));
-
-    // 128 96 112
-    // int matrix_SM = (if_split_phase == 2)? num_sms : 128;
-    int matrix_SM = num_sms;
-    if(if_split_phase != 2){
-      int sm_per_batch = params_.grid_tiled_shape.m() * params_.grid_tiled_shape.n();
-      if(num_sms % sm_per_batch == 0){
-        matrix_SM = num_sms - sm_per_batch;
-      }
-      else{
-        matrix_SM = num_sms - (num_sms % sm_per_batch);
-      }
-    }
-
-    // printf("Grdi: (%d, %d, %d); Blocks: (%d, %d, %d)\n", new_grid.x, new_grid.y, new_grid.z, block.x, block.y, block.z);
-
-    // printf("(%d, %d, %d), %d\n", grid.x, grid.y, grid.z, block.x);
 
     cudaError_t result;
 
     int smem_size = int(sizeof(typename GemmKernel::SharedStorage));
-    // 73728
-    // printf("share memory size: %d\n", smem_size);
-    
     if (smem_size >= (48 << 10)) {
-      result = cudaFuncSetAttribute(Kernel_Batched<GemmKernel>,
+      result = cudaFuncSetAttribute(Kernel<GemmKernel>,
                                     cudaFuncAttributeMaxDynamicSharedMemorySize,
                                     smem_size);
 
       if (result != cudaSuccess) {
-        printf("error\n");
         return Status::kErrorInternal;
       }
     }
 
-    // Fault Injection
-    char flag;
-    bool injection = false;
-    char *job_id = getenv("SLURM_JOB_ID");    
-
-    // int batch_per_TB = (int)(ceil((double)block_updatechk.x / (double)params_.problem_size.n()));
-    // // int B = (batch_per_TB > 6) ? 6 : batch_per_TB;
-    // // int update_smem_size = B * 2 * params_.problem_size.k() * sizeof(float);
-    // // int update_smem_size = batch_per_TB * 2 * params_.problem_size.k() * sizeof(float);
-    // int update_smem_size;
-
-    // int update_smem_size = 0;
-    // int warps_per_TB = params_.problem_size.n() / 16;
-    // int batch_per_TB = (int)(floor((double)(block_updatechk.x / 32) / (double)warps_per_TB));
-
-    int update_smem_size = 0;
-    int wmma_warps_per_TB = params_.problem_size.n() / 32;
-    // int warps_per_TB = 2 * wmma_warps_per_TB;
-    int warps_per_TB = (wmma_warps_per_TB < 16)? 2 * wmma_warps_per_TB : wmma_warps_per_TB;
-    int batch_per_TB = (int)(floor((double)(block_updatechk.x / 32) / (double)warps_per_TB));
-
-    // printf("m: %d, n: %d, k: %d, TB: %d\n", params_.problem_size.m(), params_.problem_size.n(), params_.problem_size.k(), batch_per_TB);
-    
-    // void *kernelArgs[] = {&params_, &if_split_phase, &SM_check_res, &matrix_SM, &faulty_smid, &faulty_tid_1, &faulty_tid_2, &faulty_bit, &d_counter, &d_buf};
-    int monitored_batched_count = params_.batch_count;
-
-    if(adaptive_mod){
-      monitored_batched_count = (transb == 't') ? 8 : 32;
-      // int blk_num = params_.grid_tiled_shape.m() * params_.grid_tiled_shape.n();
-      // // int bgemm_cout = num_sms / blk_num;
-      // int bgemm_cout = (int)(ceil((double)(num_sms) / (double)blk_num));
-      // int chksum_count = num_sms % blk_num;
-      // monitored_batched_count = (bgemm_cout > chksum_count) ? (2 * bgemm_cout) : (2 * chksum_count);
-    }
-
-    void *kernelArgs[] = {&params_, &if_split_phase, &SM_check_res, &matrix_SM, &batch_per_TB, &monitored_batched_count};
-    
-    // printf("SM: count: %d, GEMM SM: %d, b: %d, m: %d, n: %d, k: %d, batch_per_TB: %d\n", num_sms, matrix_SM, monitored_batched_count, params_.problem_size.m(), params_.problem_size.n(), params_.problem_size.k(), batch_per_TB);
-
     cutlass::arch::synclog_setup();
 
-    // if(if_split_phase == 0 || if_split_phase == 1) {
-    //   // cutlass::update_checksum<GemmKernel><<<grid_updatechk, block_updatechk, update_smem_size, stream_colchk>>>(params_, matrix_SM, batch_per_TB);
-    //   // cutlass::update_checksum_v2<GemmKernel><<<grid_updatechk, block_updatechk, update_smem_size, stream_colchk>>>(params_, matrix_SM, batch_per_TB);
-    //   cutlass::update_checksum_v3<GemmKernel><<<grid_updatechk, block_updatechk, update_smem_size, stream_colchk>>>(params_, matrix_SM, batch_per_TB);
-    // }
-    // cudaLaunchCooperativeKernel((void*)cutlass::Kernel_Batched<GemmKernel>, grid_gemm, block, kernelArgs, smem_size, stream);
-    // // cutlass::Kernel<GemmKernel><<<grid_gemm, block, smem_size, stream>>>(params_, if_split_phase, SM_check_res, partion, matrix_SM);
-    // if(if_split_phase == 0) cutlass::check_SM<GemmKernel><<<grid_gemm, block_updatechk, 0, stream>>>(params_, matrix_SM, SM_check_res, batch_per_TB);
-    // cudaDeviceSynchronize();
-
-    // float sum_gemm = 0, sum_chksum = 0.f, sum_check = 0.f;
-
-    // if(DEBUG){
-    //   // cudaEventRecord(abft_prepare_end, stream);
-    //   // cudaEventSynchronize(abft_prepare_end);
-    //   // cudaEventElapsedTime(&t1, abft_prepare_start, abft_prepare_end);
-
-    //   auto end_malloc = std::chrono::high_resolution_clock::now();
-    //   t1 = std::chrono::duration<float, std::milli>(end_malloc - start_malloc).count();
-
-    //   destinationFile = fs::path("./control_" + std::string(job_id) + "/" + std::to_string(gpu_dev)) / "time/preparation.txt";
-    //   recordTime(destinationFile, t1, DEBUG);
-    // }
-
-    // for(int i = 0; i < iterations; i++){
-
-    if(if_split_phase == 0 || if_split_phase == 1) {
-      // printf("update kernel\n");
-      // cutlass::update_checksum<GemmKernel><<<grid_updatechk, block_updatechk, update_smem_size, stream_colchk>>>(params_, matrix_SM, batch_per_TB);
-      // cutlass::update_checksum_v2<GemmKernel><<<grid_updatechk, block_updatechk, update_smem_size, stream_colchk>>>(params_, matrix_SM, batch_per_TB);
-      if(transb == 't'){
-        // cuda core pipeline
-        // update_smem_size = (2 * params_.problem_size.k() + 34 * params_.problem_size.n()) * sizeof(ElementA);
-        // cudaFuncSetAttribute(cutlass::update_checksum_v8_T<GemmKernel, 16, 2, ElementA>, cudaFuncAttributeMaxDynamicSharedMemorySize, update_smem_size);
-
-        // tensor core pipeline batch wise check
-        // update_smem_size = (8 * params_.problem_size.k() + 144 * (params_.problem_size.n() / 2)) * sizeof(ElementA);
-        // cudaFuncSetAttribute(cutlass::update_checksum_T_wmma_v9_2<GemmKernel, 64, 512, 2, ElementA>, cudaFuncAttributeMaxDynamicSharedMemorySize, update_smem_size);
-
-        // tensor core pipeline block wise check
-        update_smem_size = (8 * params_.problem_size.k() + 144 * (params_.problem_size.n() / 2)) * sizeof(ElementA);
-        cudaFuncSetAttribute(cutlass::update_checksum_T_wmma_v9_3<GemmKernel, 64, 512, 2, ElementA>, cudaFuncAttributeMaxDynamicSharedMemorySize, update_smem_size);
-        
-        if(DEBUG){
-          cudaEventRecord(start, stream_colchk);
-        }
-        // int monitored_batched_count = params_.batch_count;
-        
-        // cuda core pipeline
-        // cutlass::update_checksum_v8_T<GemmKernel, 16, 2, ElementA><<<grid_updatechk, block_updatechk, update_smem_size, stream_colchk>>>(params_, matrix_SM, monitored_batched_count);
-        
-        // tensor core pipeline
-        // cutlass::update_checksum_T_wmma_v9_2<GemmKernel, 64, 512, 2, ElementA><<<grid_updatechk, block_updatechk, update_smem_size, stream>>>(params_, matrix_SM, monitored_batched_count,num_sms);
-
-        cutlass::update_checksum_T_wmma_v9_3<GemmKernel, 64, 512, 2, ElementA><<<grid_updatechk, block_updatechk, update_smem_size, stream_colchk>>>(params_, matrix_SM, monitored_batched_count,num_sms);
-
-        if(DEBUG){
-          cudaEventRecord(stop, stream_colchk);
-          cudaEventSynchronize(stop);
-          cudaEventElapsedTime(&t_chksum, start, stop);
-          destinationFile = fs::path("./control_" + std::string(job_id) + "/" + std::to_string(gpu_dev)) / "time/update.txt";
-          recordTime(destinationFile, t_chksum, DEBUG);
-        //   // sum_chksum += t_chksum;
-        }
-      }
-      else{
-        // batch_per_TB = (int)(floor((double)block_updatechk.x / (double)params_.problem_size.n()));
-        // update_smem_size = batch_per_TB * 2 * params_.problem_size.k() * sizeof(ElementA);
-        // cudaFuncSetAttribute(cutlass::update_checksum_v3<GemmKernel, ElementA>, cudaFuncAttributeMaxDynamicSharedMemorySize, update_smem_size);
-
-        // batch_per_TB = (int)(floor((double)block_updatechk.x / (double)params_.problem_size.n()));
-        // update_smem_size = batch_per_TB * 8 * params_.problem_size.k() * sizeof(ElementA);
-        // cudaFuncSetAttribute(cutlass::update_checksum_v3_2<GemmKernel, ElementA>, cudaFuncAttributeMaxDynamicSharedMemorySize, update_smem_size);
-
-        update_smem_size = batch_per_TB * (8 * 144 + 144 * params_.problem_size.n()) * sizeof(ElementA);
-        cudaFuncSetAttribute(cutlass::update_checksum_wmma_v3<GemmKernel, 64, 2, ElementA>, cudaFuncAttributeMaxDynamicSharedMemorySize, update_smem_size);
-
-        if(DEBUG){
-          cudaEventRecord(start, stream_colchk);
-        }
-        // cutlass::update_checksum_v3<GemmKernel, ElementA><<<grid_updatechk, block_updatechk, update_smem_size, stream_colchk>>>(params_, matrix_SM, batch_per_TB);
-        // cutlass::update_checksum_v3<GemmKernel, ElementA><<<grid_updatechk, block_updatechk, update_smem_size, stream_colchk>>>(params_, matrix_SM, batch_per_TB, num_sms, monitored_batched_count);
-        // cutlass::update_checksum_v3_2<GemmKernel, ElementA><<<grid_updatechk, block_updatechk, update_smem_size, stream>>>(params_, matrix_SM, batch_per_TB, num_sms, monitored_batched_count);
-        cutlass::update_checksum_wmma_v3<GemmKernel, 64, 2, ElementA><<<grid_updatechk, block_updatechk, update_smem_size, stream_colchk>>>(params_, matrix_SM, batch_per_TB, num_sms, warps_per_TB, monitored_batched_count);
-        if(DEBUG){
-          cudaEventRecord(stop, stream_colchk);
-          cudaEventSynchronize(stop);
-          cudaEventElapsedTime(&t_chksum, start, stop);
-          destinationFile = fs::path("./control_" + std::string(job_id) + "/" + std::to_string(gpu_dev)) / "time/update.txt";
-          recordTime(destinationFile, t_chksum, DEBUG);
-        //   // sum_chksum += t_chksum;
-        }
-      }
+    cudaEvent_t start, stop;
+    if(DEBUG){
+      cudaEventCreate(&start);
+      cudaEventCreate(&stop);
+      cudaEventRecord(start, stream);
     }
+    float t_compute = 0;
+  
+    cutlass::Kernel<GemmKernel><<<grid, block, smem_size, stream>>>(params_);
 
-    if(DEBUG) cudaDeviceSynchronize();
-
-    // redirecte stdout
-    // int saved_stdout_fd = dup(fileno(stdout));
-    // freopen(FIInfoPath.string().c_str(), "a", stdout);
-    
     if(DEBUG){
-      cudaEventRecord(start_2, stream);
-    }   
-    cudaLaunchCooperativeKernel((void*)cutlass::Kernel_Batched<GemmKernel>, grid_gemm, block, kernelArgs, smem_size, stream);
-    // cutlass::Kernel<GemmKernel><<<grid_gemm, block, smem_size, stream_main>>>(params_, if_split_phase, SM_check_res, partion);
-    // if(if_split_phase == 0) cutlass::check_SM<GemmKernel><<<grid_gemm, block_updatechk, 0, stream>>>(params_, matrix_SM, SM_check_res);
-    if(DEBUG){
-      cudaEventRecord(stop_2, stream);
-      cudaEventSynchronize(stop_2);
-      cudaEventElapsedTime(&t_gemm, start_2, stop_2);
+      cudaEventRecord(stop, stream);
+      cudaEventSynchronize(stop);
+      cudaEventElapsedTime(&t_compute, start, stop);
       destinationFile = fs::path("./control_" + std::string(job_id) + "/" + std::to_string(gpu_dev)) / "time/bgemm.txt";
-      recordTime(destinationFile, t_gemm, DEBUG);
-
-    //   // sum_gemm += t_gemm;
+      recordTime(destinationFile, t_compute, true);
     }
-
-    // if(deBug && if_split_phase == 1){
-    //   cudaEventRecord(start, stream);
-    // }  
-    // if(if_split_phase == 1) cutlass::check_SM<GemmKernel><<<grid_gemm, block_updatechk, 0, stream>>>(params_, matrix_SM, SM_check_res, batch_per_TB);
-    // if(deBug && if_split_phase == 1){
-    //   cudaEventRecord(stop, stream);
-    //   cudaEventSynchronize(stop);
-    //   cudaEventElapsedTime(&t_check, start, stop);
-    //   sum_check += t_check;
-    // }
-    // cudaDeviceSynchronize();
-
-    // if (DEBUG){
-    //   // cudaEventRecord(abft_prepare_start, stream);
-    //   start_malloc = std::chrono::high_resolution_clock::now();
-    // }
-    
-    // direct back
-    // fflush(stdout);               
-    // dup2(saved_stdout_fd, fileno(stdout)); // restore
-    // close(saved_stdout_fd);
-    // }
-
-    // // copy back SM check results
-    // int *h_SM_check_res;
-    // h_SM_check_res = (int*)malloc(num_sms * sizeof(int));
-    // cudaMemcpy(h_SM_check_res, SM_check_res, num_sms*sizeof(int), cudaMemcpyDeviceToHost);
-    // // record checking results
-    // // int gpu_dev = -1;
-    // // cudaGetDevice(&gpu_dev);
-    // // char *job_id = getenv("SLURM_JOB_ID");
-    // fs::path SMCheckResPath = fs::path("/home/yuhangl/control_" + std::string(job_id) + "/" + std::to_string(gpu_dev)) / "SM_checking_results.txt";
-    // std::ofstream ofs(SMCheckResPath, std::ios::out | std::ios::app);
-    // // ofs.write(reinterpret_cast<const char*>(h_SM_check_res), sizeof(int) * num_sms);
-    // for (int i = 0; i < num_sms; i++) {
-    //     ofs << h_SM_check_res[i];
-    //     if (i != num_sms - 1)
-    //         ofs << " ";   // 空格分隔
-    // }
-    // ofs << "\n";          // 换行
-    // free(h_SM_check_res);
-
-
-    // if(deBug) printf("gemm kernel time: %f, update kernel time: %f, check phase: %f \n", t_gemm, t_chksum, t_check);
-
-    
-    // Clean up
-    cudaFree(SM_check_res);
-    cudaStreamDestroy(stream_colchk);
-
-    // if(DEBUG){
-    //   // cudaEventRecord(abft_prepare_end, stream);
-    //   // cudaEventSynchronize(abft_prepare_end);
-    //   // cudaEventElapsedTime(&t1, abft_prepare_start, abft_prepare_end);
-
-    //   auto end_malloc = std::chrono::high_resolution_clock::now();
-    //   t1 = std::chrono::duration<float, std::milli>(end_malloc - start_malloc).count();
-
-    //   destinationFile = fs::path("./control_" + std::string(job_id) + "/" + std::to_string(gpu_dev)) / "time/preparation.txt";
-    //   recordTime(destinationFile, t1, DEBUG);
-    // }
 
     result = cudaGetLastError();
+
+    // cudaFree(SM_check_res_1);
 
     return result == cudaSuccess ? Status::kSuccess : Status::kErrorInternal;
   }
@@ -813,7 +534,7 @@ template <
   int AlignmentB,
   typename Operator_
 >
-class GemmBatched<
+class GemmBatchedStdABFT<
   ElementA_,
   LayoutA_,
   ElementB_,
@@ -861,7 +582,7 @@ public:
   static bool const kSplitKSerial = false;
 
   //
-  using UnderlyingOperator = GemmBatched< 
+  using UnderlyingOperator = GemmBatchedStdABFT< 
     ElementB,
     typename layout::LayoutTranspose<LayoutB>::type,
     ElementA,
@@ -946,7 +667,7 @@ private:
 public:
 
   /// Constructs the GEMM.
-  GemmBatched() { }
+  GemmBatchedStdABFT() { }
 
   /// Helper to construct a transposed equivalent for the underying GEMM operator
   static UnderlyingArguments to_underlying_arguments(Arguments const &args) {
@@ -990,8 +711,9 @@ public:
   }
 
   /// Runs the kernel using initialized state.
-  Status run(int if_split_phase, bool adaptive_mod, char transb, bool DEBUG, cudaStream_t stream = nullptr) {
-    return underlying_operator_.run(if_split_phase, adaptive_mod, transb, DEBUG, stream);
+  Status run(bool DEBUG, cudaStream_t stream = nullptr) {
+
+    return underlying_operator_.run(DEBUG, stream);
   }
 
   /// Runs the kernel using initialized state.
@@ -1001,15 +723,15 @@ public:
 
   /// Runs the kernel using initialized state.
   Status operator()(
-    Arguments const &args,
-    int if_split_phase, bool adaptive_mod, char transb, bool DEBUG,
+    Arguments const &args, 
+    bool DEBUG, 
     void *workspace = nullptr, 
     cudaStream_t stream = nullptr) {
     
     Status status = initialize(args, workspace, stream);
     
     if (status == Status::kSuccess) {
-      status = run(if_split_phase, adaptive_mod, transb, DEBUG, stream);
+      status = run(DEBUG, stream);
     }
 
     return status;
