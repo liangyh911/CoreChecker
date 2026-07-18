@@ -4189,7 +4189,8 @@ bool cutlass_gemm_std_abft(char transa, char transb, int64_t m, int64_t n, int64
   // Launch initialized CUTLASS kernel
   // printf("launch\n");
   status = gemm_op(
-    // if_split_phase, adaptive_mod, banned_smid, partition, 
+    if_split_phase, partition,
+    // adaptive_mod, banned_smid, partition, 
     DEBUG, stream_main);
   CUTLASS_CHECK(status);
 

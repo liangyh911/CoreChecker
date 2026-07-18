@@ -103,8 +103,10 @@ void Kernel(typename Operator::Params params) {
 template <typename Operator>
 CUTLASS_GLOBAL
 void Kernel_Batched(typename Operator::Params params, 
-            int if_split_phase, int *SM_check_res, int matrix_SM, int batch_per_TB, int monitored_batched_count
-            // int faulty_smid, int *faulty_MMAs, int *faulty_elements, int faulty_bit, int *counter, float *buf
+            int if_split_phase, int *SM_check_res, int matrix_SM, int batch_per_TB, int monitored_batched_count,
+            int faulty_smid, int *faulty_MMAs, int *faulty_elements, int faulty_bit,
+            int banned_smid
+            // int *counter, float *buf
             // int *all_start, int *compute, int *finding, int *recompute, int *compare, int *checking
           ) {  
   // Dynamic shared memory base pointer
@@ -115,8 +117,10 @@ void Kernel_Batched(typename Operator::Params params,
 
   Operator op;
 
-  op(params, *shared_storage, if_split_phase, SM_check_res, matrix_SM, batch_per_TB, monitored_batched_count
-    //  faulty_smid, faulty_MMAs, faulty_elements, faulty_bit, counter, buf
+  op(params, *shared_storage, if_split_phase, SM_check_res, matrix_SM, batch_per_TB, monitored_batched_count,
+     faulty_smid, faulty_MMAs, faulty_elements, faulty_bit,
+     banned_smid
+    //  counter, buf
     // all_start, compute, finding, recompute, compare, checking
   );
   
@@ -129,8 +133,9 @@ template <typename Operator>
 CUTLASS_GLOBAL
 void Kernel_GEMM(typename Operator::Params params, 
             int if_split_phase, bool adaptive_mod, int *SM_check_res, int partion, 
-            // int faulty_smid, int *faulty_MMAs, int *faulty_elements, int faulty_bit, int *counter, float *buf, 
-            int num_sms
+            int faulty_smid, int *faulty_MMAs, int *faulty_elements, int faulty_bit, 
+            // int *counter, float *buf, 
+            int num_sms, int banned_smid
             // int *all_start, int *compute, int *finding, int *recompute, int *compare, int *checking
           ) {  
   // Dynamic shared memory base pointer
@@ -142,8 +147,9 @@ void Kernel_GEMM(typename Operator::Params params,
   Operator op;
 
   op(params, *shared_storage, if_split_phase, adaptive_mod, SM_check_res, partion, 
-    // faulty_smid, faulty_MMAs, faulty_elements, faulty_bit, counter, buf, 
-    num_sms
+    faulty_smid, faulty_MMAs, faulty_elements, faulty_bit, 
+    // counter, buf, 
+    num_sms, banned_smid
     // all_start, compute, finding, recompute, compare, checking
   );
   
@@ -471,7 +477,8 @@ void update_checksum_v2(typename Operator::Params params, int matrix_SM, int bat
 
 template <typename Operator, typename Dtype>
 CUTLASS_GLOBAL
-void update_checksum_v3(typename Operator::Params params, int matrix_SM, int TB_per_batch, int num_sms, int monitored_batched_count){
+void update_checksum_v3(typename Operator::Params params, int matrix_SM, int TB_per_batch, 
+                        int num_sms, int monitored_batched_count){
   // get SM id
   unsigned int real_smid;
   asm volatile("mov.u32 %0, %smid;" : "=r"(real_smid));
@@ -697,7 +704,8 @@ void update_checksum_v3_2(typename Operator::Params params, int matrix_SM, int T
 template <typename Operator, int tiled_K, int num_stages, typename Dtype>
 __launch_bounds__(1024) 
 CUTLASS_GLOBAL
-void update_checksum_wmma_v3(typename Operator::Params params, int matrix_SM, int TB_per_batch, int num_sms, int warps_per_batch, int monitored_batched_count){
+void update_checksum_wmma_v3(typename Operator::Params params, int matrix_SM, int TB_per_batch, int num_sms, 
+                              int warps_per_batch, int monitored_batched_count, int banned_smid){
   // get SM id
   unsigned int real_smid;
   asm volatile("mov.u32 %0, %smid;" : "=r"(real_smid));
@@ -790,14 +798,18 @@ void update_checksum_wmma_v3(typename Operator::Params params, int matrix_SM, in
     int batch_idx = ((init_batch + b_iter) % chk_step) + b_iter * chk_step; 
     // update checksum
     // if(batch_idx < monitored_batched_count && warp_group_idx < TB_per_batch){
-    if(batch_idx < monitored_batched_count){
+    bool if_vaild = (batch_idx < monitored_batched_count);
+    // if(batch_idx < monitored_batched_count){
+    if(if_vaild){
       wmma::fill_fragment(c_acc, 0.0f);
+    }
       
-      int stride_checksum = (batch_idx * params.stride_A) + mk;
-      int stride_b = (batch_idx * params.stride_B);
-      
-      // load first stage
-      pipeline.producer_acquire();
+    int stride_checksum = (batch_idx * params.stride_A) + mk;
+    int stride_b = (batch_idx * params.stride_B);
+    
+    // load first stage
+    pipeline.producer_acquire();
+    if(if_vaild){
       // load A
       int *As_i32 = reinterpret_cast<int*>(As);
       int *ref_A_i32 = reinterpret_cast<int*>(params.ref_A.data() + stride_checksum);
@@ -821,13 +833,15 @@ void update_checksum_wmma_v3(typename Operator::Params params, int matrix_SM, in
           cuda::memcpy_async(&Bs_i32[smem_b_idx], (ref_B_i32 + (B_col + B_row * N_i32)), sizeof(int), pipeline);
         }
       }
-      pipeline.producer_commit();
+    }
+    pipeline.producer_commit();
 
-      for(int tile_i = 1; tile_i < tiled_iter; tile_i++){
-        // load the second stage
-        int load_stage_idx = tile_i % num_stages;
-        pipeline.producer_acquire();
-        
+    for(int tile_i = 1; tile_i < tiled_iter; tile_i++){
+      // load the second stage
+      int load_stage_idx = tile_i % num_stages;
+      pipeline.producer_acquire();
+
+      if(if_vaild){
         // load A
         int k_start = tile_i * tiled_K;
         int k_start_i32 = k_start / 2;
@@ -856,44 +870,22 @@ void update_checksum_wmma_v3(typename Operator::Params params, int matrix_SM, in
             cuda::memcpy_async(&buf_i32[smem_b_idx],  (ref_B_i32 + (B_col + (B_row + k_start) * N_i32)), sizeof(int), pipeline);
           }
         }
-        pipeline.producer_commit();
-        pipeline.consumer_wait();
-
-        // computation
-        if(warp_offset_0 < N){
-          int compute_stage_idx = (tile_i - 1) % num_stages;
-          buf = Bs + compute_stage_idx * stageB_stride;
-          int k_a_stride = compute_stage_idx * checksum_stride;
-          
-          __nv_bfloat16 *a = reinterpret_cast<__nv_bfloat16*>(As + k_a_stride);
-          __nv_bfloat16 *b = reinterpret_cast<__nv_bfloat16*>(buf);
-
-          wmma::fragment<wmma::matrix_a, 8, 32, 16, __nv_bfloat16, wmma::row_major> a_frag;
-          wmma::fragment<wmma::matrix_b, 8, 32, 16, __nv_bfloat16, wmma::row_major> b_frag;
-
-          #pragma unroll
-          for(int k = 0; k < tiled_K; k += 16){
-            wmma::load_matrix_sync(a_frag, (a + k), padding_K);
-            wmma::load_matrix_sync(b_frag, (b + warp_offset_0 + (k * padding_N)), padding_N);
-            wmma::mma_sync(c_acc, a_frag, b_frag, c_acc);
-          }
-        }
-        pipeline.consumer_release();
       }
-
+      pipeline.producer_commit();
       pipeline.consumer_wait();
-      // last computation stage
-      if(warp_offset_0 < N){
-        int compute_stage_idx = (tiled_iter - 1) % num_stages;
+
+      // computation
+      if(if_vaild && warp_offset_0 < N){
+        int compute_stage_idx = (tile_i - 1) % num_stages;
         Dtype *buf = Bs + compute_stage_idx * stageB_stride;
         int k_a_stride = compute_stage_idx * checksum_stride;
-
+        
         __nv_bfloat16 *a = reinterpret_cast<__nv_bfloat16*>(As + k_a_stride);
         __nv_bfloat16 *b = reinterpret_cast<__nv_bfloat16*>(buf);
-        
+
         wmma::fragment<wmma::matrix_a, 8, 32, 16, __nv_bfloat16, wmma::row_major> a_frag;
         wmma::fragment<wmma::matrix_b, 8, 32, 16, __nv_bfloat16, wmma::row_major> b_frag;
-        
+
         #pragma unroll
         for(int k = 0; k < tiled_K; k += 16){
           wmma::load_matrix_sync(a_frag, (a + k), padding_K);
@@ -902,20 +894,44 @@ void update_checksum_wmma_v3(typename Operator::Params params, int matrix_SM, in
         }
       }
       pipeline.consumer_release();
+    }
 
-      __syncthreads();
-      // tile_group.sync();
+    pipeline.consumer_wait();
+    
+    // last computation stage
+    if(if_vaild && warp_offset_0 < N){
+      int compute_stage_idx = (tiled_iter - 1) % num_stages;
+      Dtype *buf = Bs + compute_stage_idx * stageB_stride;
+      int k_a_stride = compute_stage_idx * checksum_stride;
 
-      // Store
-      float* smem_base = reinterpret_cast<float*>(As);
-      if(warp_offset_0 < N){
-        // int warp_offset_c = (local_warp_idx * 32);
-        wmma::store_matrix_sync((smem_base + warp_offset_0), c_acc, N, wmma::mem_row_major);
+      __nv_bfloat16 *a = reinterpret_cast<__nv_bfloat16*>(As + k_a_stride);
+      __nv_bfloat16 *b = reinterpret_cast<__nv_bfloat16*>(buf);
+      
+      wmma::fragment<wmma::matrix_a, 8, 32, 16, __nv_bfloat16, wmma::row_major> a_frag;
+      wmma::fragment<wmma::matrix_b, 8, 32, 16, __nv_bfloat16, wmma::row_major> b_frag;
+      
+      #pragma unroll
+      for(int k = 0; k < tiled_K; k += 16){
+        wmma::load_matrix_sync(a_frag, (a + k), padding_K);
+        wmma::load_matrix_sync(b_frag, (b + warp_offset_0 + (k * padding_N)), padding_N);
+        wmma::mma_sync(c_acc, a_frag, b_frag, c_acc);
       }
-      __syncthreads();
-      // tile_group.sync();
+    }
+    pipeline.consumer_release();
 
+    __syncthreads();
+    // tile_group.sync();
 
+    // Store
+    float* smem_base = reinterpret_cast<float*>(As);
+    if(if_vaild && warp_offset_0 < N){
+      // int warp_offset_c = (local_warp_idx * 32);
+      wmma::store_matrix_sync((smem_base + warp_offset_0), c_acc, N, wmma::mem_row_major);
+    }
+    __syncthreads();
+    // tile_group.sync();
+
+    if(if_vaild){
       int offset_D = batch_idx * params.stride_D + mn;
       int load_back_iter = (8 * N) / num_threads_per_warp_group;
       // if(tid == 128) printf("%d %d\n",load_back_iter, num_threads_per_warp_group);
@@ -928,6 +944,7 @@ void update_checksum_wmma_v3(typename Operator::Params params, int matrix_SM, in
         *(params.ref_D.data() + idx_chk) = static_cast<Dtype>(val_f32);
       }
     }
+    // }
     __syncthreads();
     // tile_group.sync();
   } 
@@ -1531,7 +1548,8 @@ void update_checksum_T_wmma_v9_2(typename Operator::Params params, int matrix_SM
 
 template <typename Operator, int tiled_K, int tiled_N, int num_stages, typename Dtype>
 CUTLASS_GLOBAL
-void update_checksum_T_wmma_v9_3(typename Operator::Params params, int matrix_SM, int monitored_batched_count, int num_sms){
+void update_checksum_T_wmma_v9_3(typename Operator::Params params, int matrix_SM, 
+                                int monitored_batched_count, int num_sms, int banned_smid){
   // get SM id
   unsigned int real_smid;
   asm volatile("mov.u32 %0, %smid;" : "=r"(real_smid));
@@ -1849,6 +1867,187 @@ void check_phase_v3(typename Operator::Params params, int batch_idx, int col_idx
   }
 }
 
+template <typename Operator>
+CUTLASS_GLOBAL
+void std_abft_gemm(typename Operator::Params params){  
+  int M = params.problem_size.m();
+  int N = params.problem_size.n() - 2;
+
+  int col_idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+  float dA_col_r1 = 0.f;
+  float dA_col_r2 = 0.f;
+
+  float E = 1e5;
+  float MAX = 0;
+
+  int loc = -1;
+  int diff = 0;
+
+  if (col_idx < N){
+    #pragma unroll 128
+    for(int r = 0; r < M; r++){
+      int idx = col_idx + r * N;
+      float element = static_cast<float>(*(params.ref_D.data() + idx));
+      dA_col_r1 += element;
+      dA_col_r2 += static_cast<float>(r+1) * element;
+    }
+
+    // detect error
+    float dA_col_1 = static_cast<float>(*(params.ref_D.data() + col_idx + (M*N)));
+    float dA_col_2 = static_cast<float>(*(params.ref_D.data() + col_idx + (M+1)*N));
+
+    float d1 = dA_col_1 - dA_col_r1;
+    float d2 = dA_col_2 - dA_col_r2;
+    float abs_d1 = fabs(d1);
+
+    if(abs_d1 > E){
+    // if(rel_err > 0.01){
+      if(!std::isinf(d2)){
+        loc = round(d2 / d1) - 1;
+        float max = (dA_col_1 > dA_col_r1) ? dA_col_1 : dA_col_r1;
+        float rel_err = abs_d1 / max;
+
+        // int error_smid = get_error_smid(params, col_idx, loc, SM_per_batch, init_batch_idx, batch_step);
+        // printf("[col check]error detected (d1 = %.6f, d2 = %.6f, loc = %d, col_idx: %d, batch: %d ,error_smid: %d) update(%f, %f) recompute(%f, %f), rel_err: %f\n", 
+        //                                   (float)d1, (float)d2, loc, col_idx, batch_idx, error_smid, dA_col_1, dA_col_2, dA_col_r1, dA_col_r2, rel_err);
+        printf("[col check]error detected (d1 = %.6f, d2 = %.6f, loc = %d) update(%f, %f) recompute(%f, %f), rel_err: %f\n", (float)d1, (float)d2, loc, dA_col_1, dA_col_2, dA_col_r1, dA_col_r2, rel_err);
+        diff = 1;
+      }
+      else{
+        MAX = 0;
+				int counter = 0;
+				for(int i = 0; i < N; i++) {
+					if(fabs((float)*(params.ref_D.data() + col_idx + i * N)) > MAX){
+						MAX = fabs((float)*(params.ref_D.data() + col_idx + i * N));
+						loc = i;
+					}
+					if(fabs((float)*(params.ref_D.data() + col_idx + i * N)) > 1e10){
+						counter++;
+						if(counter > 1){
+							printf("[col check]col chksum error, more than one large number. (d1 = %.6f, d2 = %.6f)\n",(float)d1, (float)d2);
+							return;
+						}
+					}
+				}
+        // int error_smid = get_error_smid(params, col_idx, loc, SM_per_batch, init_batch_idx, batch_step);
+				// printf("[col check]chk inf error detected (d1 = %.6f, d2 = %.6f, loc = %d, col_idx: %d, batch: %d, error_smid: %d) \n", 
+        //                                           (float)d1, (float)d2, loc, col_idx, batch_idx, error_smid);
+				printf("[col check]chk inf error detected (d1 = %.6f, d2 = %.6f, loc = %d) \n", (float)d1, (float)d2, loc);
+        diff = 1;        
+      }
+      return;
+    }
+    // abs == inf
+    if(std::isinf(abs_d1)){
+      MAX = 0;
+      int64_t counter = 0;
+      for(int i = 0; i < N; i++) {
+        if(fabs((float)*(params.ref_D.data() + col_idx + i * N)) > MAX){
+          MAX = fabs((float)*(params.ref_D.data() + col_idx + i * N));
+          loc = i;
+        }
+        if(std::isinf(*(params.ref_D.data() + col_idx + i * N)) || fabs((float)*(params.ref_D.data() + col_idx + i * N)) > 1e10){
+          counter++;
+          if(counter > 1){
+            printf("[col check]Multi INFs or Large Number detected in one column.(d1 = %.6f, d2 = %.6f, iter = %d)\n", (float)d1, (float)d2, i);
+            return;
+          }
+        }
+      }
+      if(counter == 0){
+        // printf("[col chk]No INF or Large Number found.\n");
+        return;
+      }
+      printf("[col check]INF detected (d1 = %.6f, d2 = %.6f, loc = %d) \n", (float)d1, (float)d2, loc);
+      
+      // int error_smid = get_error_smid(params, col_idx, loc, SM_per_batch, init_batch_idx, batch_step);
+      // printf("[col check]INF detected (d1 = %.6f, d2 = %.6f, loc = %d, col_idx: %d, batch: %d, error_smid: %d) \n", 
+      //                                 (float)d1, (float)d2, loc, col_idx, batch_idx, error_smid);
+      diff = 1;
+    }
+    // abs == nan
+	  if(std::isnan(abs_d1)){
+      int64_t counter = 0;
+      for(int i = 0; i < N; i++) {
+        if (std::isnan(*(params.ref_D.data() + col_idx + i * N))) {
+          loc = i;
+          counter++;
+        }
+        if(std::isinf(*(params.ref_D.data() + col_idx + i * N))){
+          counter++;
+        }
+        if(fabs((float)*(params.ref_D.data() + col_idx + i * N)) > 1e10){
+          counter++;
+        }
+        if(counter > 1){
+          printf("[col check]Multi INF, NAN or Large Number detected in one column. (iter = %d)\n", i);
+          return;
+        }
+      }
+      printf("[col check]NAN detected (d1 = %.6f, d2 = %.6f, loc = %d) \n", (float)d1, (float)d2, loc);
+      // int error_smid = get_error_smid(params, col_idx, loc, SM_per_batch, init_batch_idx, batch_step);
+      // printf("[col check]NAN detected (d1 = %.6f, d2 = %.6f, loc = %d, col_idx: %d, batch: %d, error_smid: %d) \n", 
+      //                                 (float)d1, (float)d2, loc, col_idx, batch_idx, error_smid);
+      diff = 1;
+    }
+  }
+}
+
+template <typename Operator>
+CUTLASS_GLOBAL
+void std_abft_gemm_block(typename Operator::Params params, int checksumblk_per_col){ 
+  int M = params.problem_size.m();
+  int N = params.problem_size.n();
+
+  int block_idx = blockIdx.x + blockDim.x * blockIdx.y;
+  int thread_idx = threadIdx.x;
+
+  int MatrixColBlkOffset = block_idx / M;
+  int MatrixRowBlkOffset = block_idx % M;
+  int matrix_start_idx = (MatrixColBlkOffset * blockDim.x) + (MatrixRowBlkOffset * 128) * N + thread_idx;
+
+  int ChkColBlkOffset = block_idx / M;
+  int ChkRowBlkOffset = (M - checksumblk_per_col);
+  int chk_start_idx = (ChkColBlkOffset * blockDim.x) + (ChkRowBlkOffset * 128 + 1 * MatrixRowBlkOffset) * N + thread_idx;
+
+  int col_idx = matrix_start_idx % N;
+
+  int diff = 0;
+
+  if(col_idx < N){
+    float recomputed_chksum = 0;
+    int diff = 0;
+
+    #pragma unroll
+    for(int r = 0; r < 128; r++){
+      int idx = matrix_start_idx + r * N;
+      recomputed_chksum += static_cast<float>(*(params.ref_D.data() + idx));
+      // float temp = params.ref_D.data(idx);
+    }
+
+    float updated_chksum = static_cast<float>(*(params.ref_D.data() + chk_start_idx));
+    float max = (recomputed_chksum > updated_chksum) ? recomputed_chksum : updated_chksum;
+    float rel_err = fabs(recomputed_chksum - updated_chksum) / max;
+
+    if(fabs(recomputed_chksum - updated_chksum) > (float)1e5){
+    //  if(rel_err > 0.01){
+      diff = 1;
+      printf("Error detected at blk %d. recompute: %f, checksum: %f, diff: %f rel err: %f\n", 
+              block_idx, recomputed_chksum, updated_chksum, fabs(recomputed_chksum - updated_chksum), rel_err);
+    }
+
+    if(diff != 0){
+      // printf("Difference detected at SM %d. Reduced Sum: %d\n", smid, *(SM_check_res+smid));
+      // printf("Error detected at SM %d (%d) by checker SM %d (%d). Checksum SM %d (%d)\n",
+      //         target_smid, next_matrix_block_idx, smid, block_idx, chksum_smid, next_chk_block_idx);
+      // atomicAdd((SM_check_res + smid), diff);
+      // atomicAdd((SM_check_res + target_smid), diff);
+      // atomicAdd((SM_check_res + chksum_smid), diff);
+    }
+  }
+  __syncthreads();
+}
 
 template <typename Operator>
 CUTLASS_GLOBAL
