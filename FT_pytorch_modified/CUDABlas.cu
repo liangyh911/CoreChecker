@@ -2506,7 +2506,8 @@ bool cutlass_bgemm_T_std_abft(char transa, char transb, int64_t m, int64_t n, in
       {alpha, beta},
       num_batches
     },
-    // if_split_phase, adaptive_mod, banned_smid, transa, 
+    if_split_phase, partition,
+    // adaptive_mod, banned_smid, transa, 
     DEBUG, stream_main
   );
 
@@ -2777,7 +2778,8 @@ bool cutlass_bgemm_std_abft(char transa, char transb, int64_t m, int64_t n, int6
       {alpha, beta},
       num_batches
     },
-    // if_split_phase, adaptive_mod, banned_smid, transa, 
+    if_split_phase, partition,
+    // adaptive_mod, banned_smid, transa, 
     DEBUG, stream_main
   );
 

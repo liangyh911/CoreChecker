@@ -414,7 +414,7 @@ public:
   }
 
   /// Runs the kernel using initialized state.
-  Status run(bool DEBUG, cudaStream_t stream = nullptr) {
+  Status run(int if_split_phase, int partition, bool DEBUG, cudaStream_t stream = nullptr) {
 
     fs::path destinationFile, fullPath;
     const char* homeDir = nullptr;
@@ -466,6 +466,18 @@ public:
       cudaEventElapsedTime(&t_compute, start, stop);
       destinationFile = fs::path("./control_" + std::string(job_id) + "/" + std::to_string(gpu_dev)) / "time/bgemm.txt";
       recordTime(destinationFile, t_compute, true);
+    }
+
+    if(if_split_phase == 0){
+      cudaDeviceSynchronize();
+      cutlass::std_abft_bgemm<GemmKernel><<<dim3(params_.batch_count), dim3(params_.problem_size.n()), 0, stream>>>(params_);
+    }
+    else if(if_split_phase == 1){
+      cudaDeviceSynchronize();
+      int checksumblk_per_col = (int)(ceil((double)((partition) / (double)(128))));
+      int matrix_shape_m = params_.grid_tiled_shape.m() - checksumblk_per_col;
+      int matrix_shape_n = params_.grid_tiled_shape.n();
+      cutlass::std_abft_bgemm_block<GemmKernel><<<dim3(params_.batch_count,(matrix_shape_m * matrix_shape_n), 1), block, 0, stream>>>(params_, checksumblk_per_col);
     }
 
     result = cudaGetLastError();
@@ -711,9 +723,9 @@ public:
   }
 
   /// Runs the kernel using initialized state.
-  Status run(bool DEBUG, cudaStream_t stream = nullptr) {
+  Status run(int if_split_phase, int partition, bool DEBUG, cudaStream_t stream = nullptr) {
 
-    return underlying_operator_.run(DEBUG, stream);
+    return underlying_operator_.run(if_split_phase, partition, DEBUG, stream);
   }
 
   /// Runs the kernel using initialized state.
@@ -723,7 +735,8 @@ public:
 
   /// Runs the kernel using initialized state.
   Status operator()(
-    Arguments const &args, 
+    Arguments const &args,
+    int if_split_phase, int partition, 
     bool DEBUG, 
     void *workspace = nullptr, 
     cudaStream_t stream = nullptr) {
@@ -731,7 +744,7 @@ public:
     Status status = initialize(args, workspace, stream);
     
     if (status == Status::kSuccess) {
-      status = run(DEBUG, stream);
+      status = run(if_split_phase, partition, DEBUG, stream);
     }
 
     return status;
