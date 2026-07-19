@@ -99,6 +99,24 @@ void Kernel(typename Operator::Params params) {
   cutlass::arch::synclog_print();
 }
 
+/// Generic CUTLASS kernel template.
+template <typename Operator>
+CUTLASS_GLOBAL
+void Kernel_Std_ABFT(typename Operator::Params params, uint8_t *Signature_Array,
+                    int faulty_smid, int *faulty_MMAs, int *faulty_elements, int faulty_bit) {
+  // Dynamic shared memory base pointer
+  extern __shared__ int SharedStorageBase[];
+  // Declare pointer to dynamic shared memory.
+  typename Operator::SharedStorage *shared_storage =
+      reinterpret_cast<typename Operator::SharedStorage *>(SharedStorageBase);
+
+  Operator op;
+
+  op(params, *shared_storage, Signature_Array, 
+      faulty_smid, faulty_MMAs, faulty_elements, faulty_bit);
+  cutlass::arch::synclog_print();
+}
+
 /// Generic CUTLASS kernel template of Batched GEMM.
 template <typename Operator>
 CUTLASS_GLOBAL
@@ -1757,7 +1775,10 @@ void update_checksum_T_wmma_v9_3(typename Operator::Params params, int matrix_SM
 
 template <typename Operator>
 CUTLASS_GLOBAL
-void std_abft_gemm(typename Operator::Params params){  
+void std_abft_gemm(typename Operator::Params params, int *SM_check_res, uint8_t *Signature_Array){
+  unsigned int smid;
+  asm volatile("mov.u32 %0, %smid;" : "=r"(smid));
+  
   int M = params.problem_size.m() - 2;
   int N = params.problem_size.n();
 
@@ -1799,7 +1820,7 @@ void std_abft_gemm(typename Operator::Params params){
         // int error_smid = get_error_smid(params, col_idx, loc, SM_per_batch, init_batch_idx, batch_step);
         // printf("[col check]error detected (d1 = %.6f, d2 = %.6f, loc = %d, col_idx: %d, batch: %d ,error_smid: %d) update(%f, %f) recompute(%f, %f), rel_err: %f\n", 
         //                                   (float)d1, (float)d2, loc, col_idx, batch_idx, error_smid, dA_col_1, dA_col_2, dA_col_r1, dA_col_r2, rel_err);
-        printf("[col check]error detected (d1 = %.6f, d2 = %.6f, loc = %d) update(%f, %f) recompute(%f, %f), rel_err: %f\n", (float)d1, (float)d2, loc, dA_col_1, dA_col_2, dA_col_r1, dA_col_r2, rel_err);
+        // printf("[col check]error detected (d1 = %.6f, d2 = %.6f, loc = %d) update(%f, %f) recompute(%f, %f), rel_err: %f\n", (float)d1, (float)d2, loc, dA_col_1, dA_col_2, dA_col_r1, dA_col_r2, rel_err);
         diff = 1;
       }
       else{
@@ -1813,7 +1834,7 @@ void std_abft_gemm(typename Operator::Params params){
 					if(fabs((float)*(params.ref_D.data() + col_idx + i * N)) > 1e10){
 						counter++;
 						if(counter > 1){
-							printf("[col check]col chksum error, more than one large number. (d1 = %.6f, d2 = %.6f)\n",(float)d1, (float)d2);
+							// printf("[col check]col chksum error, more than one large number. (d1 = %.6f, d2 = %.6f)\n",(float)d1, (float)d2);
 							return;
 						}
 					}
@@ -1821,10 +1842,10 @@ void std_abft_gemm(typename Operator::Params params){
         // int error_smid = get_error_smid(params, col_idx, loc, SM_per_batch, init_batch_idx, batch_step);
 				// printf("[col check]chk inf error detected (d1 = %.6f, d2 = %.6f, loc = %d, col_idx: %d, batch: %d, error_smid: %d) \n", 
         //                                           (float)d1, (float)d2, loc, col_idx, batch_idx, error_smid);
-				printf("[col check]chk inf error detected (d1 = %.6f, d2 = %.6f, loc = %d) \n", (float)d1, (float)d2, loc);
+				// printf("[col check]chk inf error detected (d1 = %.6f, d2 = %.6f, loc = %d) \n", (float)d1, (float)d2, loc);
         diff = 1;        
       }
-      return;
+      // return;
     }
     // abs == inf
     if(std::isinf(abs_d1)){
@@ -1838,7 +1859,7 @@ void std_abft_gemm(typename Operator::Params params){
         if(std::isinf(*(params.ref_D.data() + col_idx + i * N)) || fabs((float)*(params.ref_D.data() + col_idx + i * N)) > 1e10){
           counter++;
           if(counter > 1){
-            printf("[col check]Multi INFs or Large Number detected in one column.(d1 = %.6f, d2 = %.6f, iter = %d)\n", (float)d1, (float)d2, i);
+            // printf("[col check]Multi INFs or Large Number detected in one column.(d1 = %.6f, d2 = %.6f, iter = %d)\n", (float)d1, (float)d2, i);
             return;
           }
         }
@@ -1847,7 +1868,7 @@ void std_abft_gemm(typename Operator::Params params){
         // printf("[col chk]No INF or Large Number found.\n");
         return;
       }
-      printf("[col check]INF detected (d1 = %.6f, d2 = %.6f, loc = %d) \n", (float)d1, (float)d2, loc);
+      // printf("[col check]INF detected (d1 = %.6f, d2 = %.6f, loc = %d) \n", (float)d1, (float)d2, loc);
       
       // int error_smid = get_error_smid(params, col_idx, loc, SM_per_batch, init_batch_idx, batch_step);
       // printf("[col check]INF detected (d1 = %.6f, d2 = %.6f, loc = %d, col_idx: %d, batch: %d, error_smid: %d) \n", 
@@ -1869,34 +1890,51 @@ void std_abft_gemm(typename Operator::Params params){
           counter++;
         }
         if(counter > 1){
-          printf("[col check]Multi INF, NAN or Large Number detected in one column. (iter = %d)\n", i);
+          // printf("[col check]Multi INF, NAN or Large Number detected in one column. (iter = %d)\n", i);
           return;
         }
       }
-      printf("[col check]NAN detected (d1 = %.6f, d2 = %.6f, loc = %d) \n", (float)d1, (float)d2, loc);
+      // printf("[col check]NAN detected (d1 = %.6f, d2 = %.6f, loc = %d) \n", (float)d1, (float)d2, loc);
       // int error_smid = get_error_smid(params, col_idx, loc, SM_per_batch, init_batch_idx, batch_step);
       // printf("[col check]NAN detected (d1 = %.6f, d2 = %.6f, loc = %d, col_idx: %d, batch: %d, error_smid: %d) \n", 
       //                                 (float)d1, (float)d2, loc, col_idx, batch_idx, error_smid);
       diff = 1;
+    }
+
+    if (diff != 0){
+      int faulty_blk_idx = loc / 128;
+      int target_smid = *(Signature_Array + faulty_blk_idx);
+      
+      int update_blk_idx = (col_idx / 256) * params.grid_tiled_shape.m();
+      int chksum_smid = *(Signature_Array + update_blk_idx);
+
+      printf("Faulty SM: %d, Update SM: %d, Checker SM: %d\n", target_smid, chksum_smid, smid);
+      
+      atomicAdd((SM_check_res + target_smid), diff);
+      atomicAdd((SM_check_res + smid), diff);
+      atomicAdd((SM_check_res + chksum_smid), diff);
     }
   }
 }
 
 template <typename Operator>
 CUTLASS_GLOBAL
-void std_abft_gemm_block(typename Operator::Params params, int checksumblk_per_col){ 
-  int M = params.problem_size.m();
+void std_abft_gemm_block(typename Operator::Params params, int checksumblk_per_col, int *SM_check_res, uint8_t *Signature_Array){ 
+  unsigned int smid;
+  asm volatile("mov.u32 %0, %smid;" : "=r"(smid));
+
+  int M_shape = params.grid_tiled_shape.m();
   int N = params.problem_size.n();
 
-  int block_idx = blockIdx.x + blockDim.x * blockIdx.y;
+  int block_idx = blockIdx.x;
   int thread_idx = threadIdx.x;
 
-  int MatrixColBlkOffset = block_idx / M;
-  int MatrixRowBlkOffset = block_idx % M;
+  int MatrixColBlkOffset = block_idx / M_shape;
+  int MatrixRowBlkOffset = block_idx % M_shape;
   int matrix_start_idx = (MatrixColBlkOffset * blockDim.x) + (MatrixRowBlkOffset * 128) * N + thread_idx;
 
-  int ChkColBlkOffset = block_idx / M;
-  int ChkRowBlkOffset = (M - checksumblk_per_col);
+  int ChkColBlkOffset = block_idx / M_shape;
+  int ChkRowBlkOffset = (M_shape - checksumblk_per_col);
   int chk_start_idx = (ChkColBlkOffset * blockDim.x) + (ChkRowBlkOffset * 128 + 1 * MatrixRowBlkOffset) * N + thread_idx;
 
   int col_idx = matrix_start_idx % N;
@@ -1921,17 +1959,23 @@ void std_abft_gemm_block(typename Operator::Params params, int checksumblk_per_c
     if(fabs(recomputed_chksum - updated_chksum) > (float)1e5){
     //  if(rel_err > 0.01){
       diff = 1;
-      printf("Error detected at blk %d. recompute: %f, checksum: %f, diff: %f rel err: %f\n", 
-              block_idx, recomputed_chksum, updated_chksum, fabs(recomputed_chksum - updated_chksum), rel_err);
+      // printf("Error detected at blk %d, col %d. recompute: %f, checksum: %f, diff: %f rel err: %f\n", 
+      //         block_idx, col_idx, recomputed_chksum, updated_chksum, fabs(recomputed_chksum - updated_chksum), rel_err);
     }
 
     if(diff != 0){
       // printf("Difference detected at SM %d. Reduced Sum: %d\n", smid, *(SM_check_res+smid));
       // printf("Error detected at SM %d (%d) by checker SM %d (%d). Checksum SM %d (%d)\n",
       //         target_smid, next_matrix_block_idx, smid, block_idx, chksum_smid, next_chk_block_idx);
-      // atomicAdd((SM_check_res + smid), diff);
-      // atomicAdd((SM_check_res + target_smid), diff);
-      // atomicAdd((SM_check_res + chksum_smid), diff);
+
+      int target_smid = *(Signature_Array + block_idx);
+      int chksum_smid = *(Signature_Array + (ChkColBlkOffset * M_shape));
+
+      printf("Faulty SM: %d, Update SM: %d, Checker SM: %d\n", target_smid, chksum_smid, smid);
+
+      atomicAdd((SM_check_res + smid), diff);
+      atomicAdd((SM_check_res + target_smid), diff);
+      atomicAdd((SM_check_res + chksum_smid), diff);
     }
   }
   __syncthreads();
@@ -1939,7 +1983,10 @@ void std_abft_gemm_block(typename Operator::Params params, int checksumblk_per_c
 
 template <typename Operator>
 CUTLASS_GLOBAL
-void std_abft_bgemm(typename Operator::Params params){
+void std_abft_bgemm(typename Operator::Params params, uint8_t *Signature_Array, int *SM_check_res){
+  unsigned int smid;
+  asm volatile("mov.u32 %0, %smid;" : "=r"(smid));
+
   int M = params.problem_size.m();
   int N = params.problem_size.n() - 2;
 
@@ -1986,7 +2033,7 @@ void std_abft_bgemm(typename Operator::Params params){
       // int error_smid = get_error_smid(params, col_idx, loc, SM_per_batch, init_batch_idx, batch_step);
       // printf("[col check]error detected (d1 = %.6f, d2 = %.6f, loc = %d, col_idx: %d, batch: %d ,error_smid: %d) update(%f, %f) recompute(%f, %f), rel_err: %f\n", 
       //                                   (float)d1, (float)d2, loc, col_idx, batch_idx, error_smid, dA_col_1, dA_col_2, dA_col_r1, dA_col_r2, rel_err);
-      printf("[col check]error detected (d1 = %.6f, d2 = %.6f, loc = %d) update(%f, %f) recompute(%f, %f), rel_err: %f\n", (float)d1, (float)d2, loc, dA_col_1, dA_col_2, dA_col_r1, dA_col_r2, rel_err);
+      // printf("[col check]error detected (d1 = %.6f, d2 = %.6f, loc = %d) update(%f, %f) recompute(%f, %f), rel_err: %f\n", (float)d1, (float)d2, loc, dA_col_1, dA_col_2, dA_col_r1, dA_col_r2, rel_err);
       diff = 1;
     }
     else{
@@ -2000,7 +2047,7 @@ void std_abft_bgemm(typename Operator::Params params){
         if(fabs((float)*(params.ref_D.data() + start_idx + i * N)) > 1e10){
           counter++;
           if(counter > 1){
-            printf("[col check]col chksum error, more than one large number. (d1 = %.6f, d2 = %.6f)\n",(float)d1, (float)d2);
+            // printf("[col check]col chksum error, more than one large number. (d1 = %.6f, d2 = %.6f)\n",(float)d1, (float)d2);
             return;
           }
         }
@@ -2009,10 +2056,10 @@ void std_abft_bgemm(typename Operator::Params params){
       // int error_smid = get_error_smid(params, col_idx, loc, SM_per_batch, init_batch_idx, batch_step);
       // printf("[col check]chk inf error detected (d1 = %.6f, d2 = %.6f, loc = %d, col_idx: %d, batch: %d, error_smid: %d) \n", 
       //                                           (float)d1, (float)d2, loc, col_idx, batch_idx, error_smid);
-      printf("[col check]chk inf error detected (d1 = %.6f, d2 = %.6f, loc = %d) \n", (float)d1, (float)d2, loc);
+      // printf("[col check]chk inf error detected (d1 = %.6f, d2 = %.6f, loc = %d) \n", (float)d1, (float)d2, loc);
       diff = 1;        
     }
-    return;
+    // return;
   }
   if(std::isinf(abs_d1)){
     MAX = 0;
@@ -2025,16 +2072,16 @@ void std_abft_bgemm(typename Operator::Params params){
       if(std::isinf(*(params.ref_D.data() + start_idx + i * N)) || fabs((float)*(params.ref_D.data() + start_idx + i * N)) > 1e10){
         counter++;
         if(counter > 1){
-          printf("[col check]Multi INFs or Large Number detected in one column.(d1 = %.6f, d2 = %.6f, iter = %d)\n", (float)d1, (float)d2, i);
+          // printf("[col check]Multi INFs or Large Number detected in one column.(d1 = %.6f, d2 = %.6f, iter = %d)\n", (float)d1, (float)d2, i);
           return;
         }
       }
     }
     if(counter == 0){
-      printf("[col chk]No INF or Large Number found.\n");
+      // printf("[col chk]No INF or Large Number found.\n");
       return;
     }
-    printf("[col check]INF detected (d1 = %.6f, d2 = %.6f, loc = %d) \n", (float)d1, (float)d2, loc);
+    // printf("[col check]INF detected (d1 = %.6f, d2 = %.6f, loc = %d) \n", (float)d1, (float)d2, loc);
     
     // int error_smid = get_error_smid(params, col_idx, loc, SM_per_batch, init_batch_idx, batch_step);
     // printf("[col check]INF detected (d1 = %.6f, d2 = %.6f, loc = %d, col_idx: %d, batch: %d, error_smid: %d) \n", 
@@ -2056,35 +2103,55 @@ void std_abft_bgemm(typename Operator::Params params){
         counter++;
       }
       if(counter > 1){
-        printf("[col check]Multi INF, NAN or Large Number detected in one column. (iter = %d)\n", i);
+        // printf("[col check]Multi INF, NAN or Large Number detected in one column. (iter = %d)\n", i);
         return;
       }
     }
-    printf("[col check]NAN detected (d1 = %.6f, d2 = %.6f, loc = %d) \n", (float)d1, (float)d2, loc);
+    // printf("[col check]NAN detected (d1 = %.6f, d2 = %.6f, loc = %d) \n", (float)d1, (float)d2, loc);
     // int error_smid = get_error_smid(params, col_idx, loc, SM_per_batch, init_batch_idx, batch_step);
     // printf("[col check]NAN detected (d1 = %.6f, d2 = %.6f, loc = %d, col_idx: %d, batch: %d, error_smid: %d) \n", 
     //                                 (float)d1, (float)d2, loc, col_idx, batch_idx, error_smid);
     diff = 1;
   }
+
+  if(diff != 0){
+    int batch_offset = batch_idx * (params.grid_tiled_shape.m() * params.grid_tiled_shape.n());
+
+    int faulty_blk_idx = loc / 128;
+    int target_smid = *(Signature_Array + batch_offset + faulty_blk_idx);
+    
+    int update_blk_idx = (col_idx / 256) * params.grid_tiled_shape.m();
+    int chksum_smid = *(Signature_Array + batch_offset + update_blk_idx);
+
+    printf("Faulty SM: %d, Update SM: %d, Checker SM: %d\n", target_smid, chksum_smid, smid);
+
+    atomicAdd((SM_check_res + smid), diff);
+    atomicAdd((SM_check_res + target_smid), diff);
+    atomicAdd((SM_check_res + chksum_smid), diff);
+  }
 } 
 
 template <typename Operator>
 CUTLASS_GLOBAL
-void std_abft_bgemm_block(typename Operator::Params params, int checksumblk_per_col){ 
-  int M = params.problem_size.m();
+void std_abft_bgemm_block(typename Operator::Params params, int checksumblk_per_col, uint8_t *Signature_Array, int *SM_check_res){ 
+  // int M = params.problem_size.m();
+  unsigned int smid;
+  asm volatile("mov.u32 %0, %smid;" : "=r"(smid));
+
+  int M_shape = params.grid_tiled_shape.m();
   int N = params.problem_size.n();
   
   int batch_idx = blockIdx.x;
   int block_idx = blockIdx.y;
   int thread_idx = threadIdx.x;
 
-  int MatrixColBlkOffset = block_idx / M;
-  int MatrixRowBlkOffset = block_idx % M;
-  int matrix_start_idx = (batch_idx * params.stride_D) + (MatrixColBlkOffset * blockDim.y) + (MatrixRowBlkOffset * 128) * N + thread_idx;
+  int MatrixColBlkOffset = block_idx / M_shape;
+  int MatrixRowBlkOffset = block_idx % M_shape;
+  int matrix_start_idx = (batch_idx * params.stride_D) + (MatrixColBlkOffset * blockDim.x) + (MatrixRowBlkOffset * 128) * N + thread_idx;
 
-  int ChkColBlkOffset = block_idx / M;
-  int ChkRowBlkOffset = (M - checksumblk_per_col);
-  int chk_start_idx = (batch_idx * params.stride_D) + (ChkColBlkOffset * blockDim.y) + (ChkRowBlkOffset * 128 + 1 * MatrixRowBlkOffset) * N + thread_idx;
+  int ChkColBlkOffset = block_idx / M_shape;
+  int ChkRowBlkOffset = (M_shape - checksumblk_per_col);
+  int chk_start_idx = (batch_idx * params.stride_D) + (ChkColBlkOffset * blockDim.x) + (ChkRowBlkOffset * 128 + 1 * MatrixRowBlkOffset) * N + thread_idx;
 
   float recomputed_chksum = 0;
   int diff = 0;
@@ -2108,8 +2175,8 @@ void std_abft_bgemm_block(typename Operator::Params params, int checksumblk_per_
     // float atol = 1.0f;  // 绝对容忍（给正负抵消留出的底线）
     // if (fabs(recomputed_chksum - updated_chksum) > (atol + rtol * fabs(recomputed_chksum))){
       diff = 1;
-      printf("tid: %d, Batch %d, Error detected at Block %d. recompute: %f, checksum: %f, diff: %f rel err: %f\n", 
-              thread_idx, batch_idx, block_idx, recomputed_chksum, updated_chksum, fabs(recomputed_chksum - updated_chksum), rel_err);
+      // printf("Batch %d, Error detected at Block %d, Col(tid) %d. recompute: %f, checksum: %f, diff: %f rel err: %f\n", 
+      //         batch_idx, block_idx, thread_idx, recomputed_chksum, updated_chksum, fabs(recomputed_chksum - updated_chksum), rel_err);
     }
     // __syncthreads();
     // if(thread_idx == 0 && smid == 0){
@@ -2121,9 +2188,15 @@ void std_abft_bgemm_block(typename Operator::Params params, int checksumblk_per_
       // printf("Difference detected at SM %d. Reduced Sum: %d\n", smid, *(SM_check_res+smid));
       // printf("Error detected at SM %d (%d) by checker SM %d (%d). Checksum SM %d (%d)\n",
       //         target_smid, next_matrix_block_idx, smid, block_idx, chksum_smid, next_chk_block_idx);
-      // atomicAdd((SM_check_res + smid), diff);
-      // atomicAdd((SM_check_res + target_smid), diff);
-      // atomicAdd((SM_check_res + chksum_smid), diff);
+      int batch_offset = batch_idx * (M_shape * params.grid_tiled_shape.n()); 
+      int target_smid = *(Signature_Array + batch_offset + block_idx);
+      int chksum_smid = *(Signature_Array + batch_offset + (ChkColBlkOffset * M_shape));
+
+      printf("Faulty SM: %d, Update SM: %d, Checker SM: %d\n", target_smid, chksum_smid, smid);
+
+      atomicAdd((SM_check_res + smid), diff);
+      atomicAdd((SM_check_res + target_smid), diff);
+      atomicAdd((SM_check_res + chksum_smid), diff);
     }
   }
   __syncthreads();

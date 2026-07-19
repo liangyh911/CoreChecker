@@ -489,14 +489,25 @@ public:
     homeDir = getenv("HOME");
     fs::path homePath(homeDir);
 
-    char *job_id = getenv("SLURM_JOB_ID");
     int gpu_dev = -1;
     cudaGetDevice(&gpu_dev);
 
+    char *job_id = getenv("SLURM_JOB_ID");
+
+    int num_block = params_.grid_tiled_shape.m() * params_.grid_tiled_shape.n();
+    uint8_t *Signature_Array;
+    cudaMalloc((void**)&Signature_Array, num_block * sizeof(uint8_t));
+    cudaMemset(Signature_Array, 255, num_block * sizeof(uint8_t));
+
     // int num_sms = 132;
-    // int *SM_check_res;
-    // cudaMalloc((void**)&SM_check_res, num_sms * sizeof(int));
-    // cudaMemset(SM_check_res, 0, num_sms * sizeof(int));
+    // get sm count 
+    cudaDeviceProp prop;
+    cudaGetDeviceProperties(&prop, gpu_dev);
+    int num_sms = prop.multiProcessorCount;
+    
+    int *SM_check_res;
+    cudaMalloc((void**)&SM_check_res, num_sms * sizeof(int));
+    cudaMemset(SM_check_res, 0, num_sms * sizeof(int));
 
     ThreadblockSwizzle threadblock_swizzle;
 
@@ -508,7 +519,7 @@ public:
     int smem_size = int(sizeof(typename GemmKernel::SharedStorage));
 
     if (smem_size >= (48 << 10)) {
-      result = cudaFuncSetAttribute(Kernel<GemmKernel>,
+      result = cudaFuncSetAttribute(Kernel_Std_ABFT<GemmKernel>,
                                     cudaFuncAttributeMaxDynamicSharedMemorySize,
                                     smem_size);
 
@@ -516,6 +527,96 @@ public:
         return Status::kErrorInternal;
       }
     }
+
+    // Fault Injection
+    char flag;
+    bool injection = false;
+    int faulty_smid =-1, faulty_bit = -1, *h_faulty_MMAs, *d_faulty_MMAs, *h_faulty_elements, *d_faulty_elements;
+    
+    // Relative Path
+    destinationFile = fs::path("./control_" + std::string(job_id) + "/" + std::to_string(gpu_dev)) / "FI.txt";
+
+    std::ifstream FIFile(destinationFile);
+    if(FIFile.is_open()){
+      FIFile.get(flag);
+      if(flag == 't'){
+        size_t faulty_size = sizeof(int) * 64;
+
+        h_faulty_MMAs = (int*)malloc(faulty_size);
+        h_faulty_elements = (int*)malloc(faulty_size);
+        cudaMalloc((void**)&d_faulty_MMAs, faulty_size);
+        cudaMemset(d_faulty_MMAs, -1, faulty_size);
+        cudaMalloc((void**)&d_faulty_elements, faulty_size);
+        cudaMemset(d_faulty_elements, -1, faulty_size);
+
+        injection = true;
+        
+        // Relative Path
+        fs::path planPath = fs::path("./control_" + std::string(job_id) + "/" + std::to_string(gpu_dev)) / "plan.txt";
+        std::ifstream planFile(planPath);
+        if(planFile.is_open()){
+          std::string line;
+          // while (std::getline(planFile, line)) {
+            
+          if (!std::getline(planFile, line)) {
+              std::cerr << "File is empty" << std::endl;
+              return Status::kErrorInternal;
+          }
+
+          std::stringstream ss(line);
+          std::string token;
+          std::vector<int> nums;
+
+          while (std::getline(ss, token, ' ')) {
+              nums.push_back(std::stoi(token));
+          }
+
+          // if (nums.size() != 129) {
+          //     printf("Error: expected 129 numbers but got %ld\n", nums.size());
+          //     return Status::kErrorInternal;
+          // }
+
+          int idx = 0;
+          faulty_smid = nums[idx++];
+          faulty_smid = faulty_smid % num_sms;
+          // printf("faulty SM: %d, faulty MMA: ", faulty_smid);
+
+          for (int i = 0; i < 64; i++){
+            h_faulty_MMAs[i] = nums[idx++];
+            // printf("%d ", h_faulty_MMAs[i]);
+          }
+
+          // printf("faulty elements: ");
+          for (int i = 0; i < 64; i++){
+            h_faulty_elements[i] = nums[idx++];
+            // printf("%d ", h_faulty_elements[i]);
+          }
+
+          cudaMemcpy(d_faulty_MMAs, h_faulty_MMAs, faulty_size, cudaMemcpyHostToDevice);
+          cudaMemcpy(d_faulty_elements, h_faulty_elements, faulty_size, cudaMemcpyHostToDevice);
+        }
+        else{
+          printf("plan: Cannot open file, using default setting.\n");
+        }
+        planFile.close();
+
+        fs::path bitPath = fs::path("./control_" + std::string(job_id) + "/" + std::to_string(gpu_dev)) / "bit.txt";
+        std::ifstream bitFile(bitPath);
+        if(bitFile.is_open()){
+          if (bitFile >> faulty_bit) {
+              // std::cout << "faulty_bit = " << faulty_bit << std::endl;
+          }
+        }
+        else{
+          printf("bit: Cannot open file, using default setting.\n");
+        }
+        bitFile.close();
+      }
+    }
+    else{
+      printf("FI: Cannot open file, using default setting.\n");
+    }
+    FIFile.close();
 
     cutlass::arch::synclog_setup();
     
@@ -527,7 +628,10 @@ public:
     }
     float t_compute = 0;
 
-    cutlass::Kernel<GemmKernel><<<grid, block, smem_size, stream>>>(params_);
+    cutlass::Kernel_Std_ABFT<GemmKernel><<<grid, block, smem_size, stream>>>(
+      params_, Signature_Array,
+      faulty_smid, d_faulty_MMAs, d_faulty_elements, faulty_bit
+    );
 
     if(DEBUG){
       cudaEventRecord(stop, stream);
@@ -539,17 +643,40 @@ public:
 
     if(if_split_phase == 0){
       cudaDeviceSynchronize();
-      cutlass::std_abft_gemm<GemmKernel><<<dim3(params_.grid_tiled_shape.n(), 1, 1), block, 0, stream>>>(params_);
+      cutlass::std_abft_gemm<GemmKernel><<<dim3(params_.grid_tiled_shape.n(), 1, 1), block, 0, stream>>>(params_, SM_check_res, Signature_Array);
     }
     else if (if_split_phase == 1){
       cudaDeviceSynchronize();
       int checksumblk_per_col = (int)(ceil((double)((partition) / (double)(128))));
       int matrix_shape_m = params_.grid_tiled_shape.m() - checksumblk_per_col;
       int matrix_shape_n = params_.grid_tiled_shape.n();
-      cutlass::std_abft_gemm_block<GemmKernel><<<dim3((matrix_shape_m * matrix_shape_n), 1, 1), block, 0, stream>>>(params_, checksumblk_per_col);
+      cutlass::std_abft_gemm_block<GemmKernel><<<dim3((matrix_shape_m * matrix_shape_n), 1, 1), block, 0, stream>>>(params_, checksumblk_per_col, SM_check_res, Signature_Array);
     }
 
-    // cudaFree(SM_check_res);
+    if (injection){
+      cudaDeviceSynchronize();
+      // // copy back SM check results
+      int *h_SM_check_res;
+      h_SM_check_res = (int*)malloc(num_sms * sizeof(int));
+      cudaMemcpy(h_SM_check_res, SM_check_res, num_sms*sizeof(int), cudaMemcpyDeviceToHost);
+      // record checking results
+      fs::path SMCheckResPath = fs::path("/home/yuhangl/control_" + std::string(job_id) + "/" + std::to_string(gpu_dev)) / "SM_checking_results.txt";
+      std::ofstream ofs(SMCheckResPath, std::ios::out | std::ios::app);
+      for (int i = 0; i < num_sms; i++) {
+          ofs << h_SM_check_res[i];
+          if (i != num_sms - 1)
+              ofs << " ";   // 空格分隔
+      }
+      ofs << "\n";          // 换行
+      free(h_SM_check_res);
+      cudaFree(d_faulty_MMAs);
+      cudaFree(d_faulty_elements);
+      free(h_faulty_MMAs);
+      free(h_faulty_elements);
+    }
+
+    cudaFree(SM_check_res);
+    cudaFree(Signature_Array);
 
     result = cudaGetLastError();
 

@@ -130,6 +130,34 @@ struct GemmBatchedStdABFT {
     typename Epilogue::SharedStorage epilogue;
   };
 
+  template <typename T>
+  __device__ void force_bit_one_bf16(T *dA, int bit){ 
+    // 30 or 29
+    float orgValue = static_cast<float>(*dA);
+    float tmp = orgValue;
+    // printf("%.4f ", orgValue);
+    
+    // uint32_t* intValue = reinterpret_cast<uint32_t*>(&orgValue);
+    uint32_t intValue = *reinterpret_cast<uint32_t*>(&orgValue);
+    uint16_t bf16_bits = static_cast<uint16_t>(intValue >> 16);
+    bf16_bits |= (1u << bit);
+    // *intValue &= ~ ((1u << bit));
+
+    uint32_t new_int_value = (static_cast<uint32_t>(bf16_bits) << 16);
+    float new_float = *reinterpret_cast<float*>(&new_int_value);
+    *dA = static_cast<cutlass::bfloat16_t>(new_float);
+
+    // if(tmp != new_float){
+    //   // printf("%.4f %.4f ", tmp, new_float);
+    //   // int idx = (*count) * 2;
+    //   int idx = *count;
+    //   *(buf + idx) = tmp;
+    //   *(buf + (idx + 1)) = new_float;
+    //   (*count) += 2;
+    // }
+    // printf("%.4f ", *(dA));
+  }
+
   //
   // Methods
   //
@@ -137,7 +165,13 @@ struct GemmBatchedStdABFT {
 
   /// Executes one GEMM
   CUTLASS_DEVICE
-  void operator()(Params const &params, SharedStorage &shared_storage) {
+  void operator()(Params const &params, SharedStorage &shared_storage, uint8_t *Signature_Array,
+                  int faulty_smid, int *faulty_MMAs, int *faulty_elements, int faulty_bit) {
+    unsigned int real_smid;
+    asm volatile("mov.u32 %0, %smid;" : "=r"(real_smid));
+    int thread_idx = threadIdx.x;
+
+    int num_block = params.grid_tiled_shape.m() * params.grid_tiled_shape.n();
 
     // Compute threadblock location
     ThreadblockSwizzle threadblock_swizzle;
@@ -231,6 +265,9 @@ struct GemmBatchedStdABFT {
         threadblock_tile_offset.n() * Mma::Shape::kN
       );
 
+      int block_idx = threadblock_tile_offset.m() + threadblock_tile_offset.n() * params.grid_tiled_shape.m();
+      if(thread_idx == 0) *(Signature_Array + batch_idx * num_block + block_idx) = real_smid;
+
       // Tile iterator writing to output tile
       typename Epilogue::OutputTileIterator iterator_C(
         params.params_C,
@@ -261,7 +298,41 @@ struct GemmBatchedStdABFT {
 
       // run efficient epilogue
       epilogue(output_op, iterator_D, accumulators, iterator_C);
+
+      // Fault Injection
+      if(real_smid == faulty_smid && thread_idx == 0){
+        // int mma_grid_m = params.problem_size.m() / 16;
+        // int mma_grid_n = params.problem_size.n() / 8;
+        int N = params.problem_size.n();
+        int c = 0;
+        for(int i = 0; i < 64; i++){
+          int mma_m = (threadblock_tile_offset.m() * 128) + (faulty_MMAs[i] % 8) * 16;
+          int mma_n = (threadblock_tile_offset.n() * 256) + (faulty_MMAs[i] / 8) * 8;
+
+          // index of 1st faulty element
+          int fault_m = faulty_elements[i] % 8;
+          int fault_n = faulty_elements[i] / 8;
+          if((mma_n + fault_n) < params.problem_size.n() ){
+            int idx = (mma_m + fault_m) * N + (mma_n + fault_n);
+            force_bit_one_bf16((params.ref_D.data() + idx + batch_idx * params.stride_D), faulty_bit);
+
+            // index of 2nd faulty element (gap is 64)
+            fault_m += 8;
+            idx = (mma_m + fault_m) * N + (mma_n + fault_n);
+            force_bit_one_bf16((params.ref_D.data() + idx + batch_idx * params.stride_D), faulty_bit);
+          }
+        }
+      }
+      // if(batch_idx == 0 && block_idx == 0 && thread_idx == 0){
+      //   *(params.ref_D.data() + 1) = static_cast<cutlass::bfloat16_t>(1e6);
+      //   printf("ground true faulty SM: %d\n", real_smid);
+      // }
     }
+
+    // 
+    // if(real_smid == 0 && thread_idx == 0){
+    //   *(params.ref_D.data() + 1) = static_cast<cutlass::bfloat16_t>(1e6);
+    // }
   }
 };
 
