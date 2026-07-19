@@ -227,7 +227,7 @@ struct GemmStdABFT {
 
   /// Executes one GEMM
   CUTLASS_DEVICE
-  void operator()(Params const &params, SharedStorage &shared_storage, uint8_t *Signature_Array,
+  void operator()(Params const &params, SharedStorage &shared_storage, uint8_t *Signature_Array, int banned_smid,
                   int faulty_smid, int *faulty_MMAs, int *faulty_elements, int faulty_bit) {
     unsigned int real_smid;
     asm volatile("mov.u32 %0, %smid;" : "=r"(real_smid));
@@ -382,7 +382,7 @@ struct GemmStdABFT {
     epilogue(output_op, iterator_D, accumulators, iterator_C); 
 
     // Fault Injection
-    if(real_smid == faulty_smid && thread_idx == 0){
+    if(real_smid == faulty_smid && thread_idx == 0 && banned_smid != faulty_smid){
       // int mma_grid_m = params.problem_size.m() / 16;
       // int mma_grid_n = params.problem_size.n() / 8;
       int N = params.problem_size.n();

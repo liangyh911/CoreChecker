@@ -2506,8 +2506,8 @@ bool cutlass_bgemm_T_std_abft(char transa, char transb, int64_t m, int64_t n, in
       {alpha, beta},
       num_batches
     },
-    if_split_phase, partition,
-    // adaptive_mod, banned_smid, transa, 
+    if_split_phase, partition, banned_smid, 
+    // adaptive_mod, transa, 
     DEBUG, stream_main
   );
 
@@ -2778,8 +2778,8 @@ bool cutlass_bgemm_std_abft(char transa, char transb, int64_t m, int64_t n, int6
       {alpha, beta},
       num_batches
     },
-    if_split_phase, partition,
-    // adaptive_mod, banned_smid, transa, 
+    if_split_phase, partition, banned_smid,
+    // adaptive_mod, transa, 
     DEBUG, stream_main
   );
 
@@ -4191,8 +4191,8 @@ bool cutlass_gemm_std_abft(char transa, char transb, int64_t m, int64_t n, int64
   // Launch initialized CUTLASS kernel
   // printf("launch\n");
   status = gemm_op(
-    if_split_phase, partition,
-    // adaptive_mod, banned_smid, partition, 
+    if_split_phase, partition, banned_smid,
+    // adaptive_mod, partition, 
     DEBUG, stream_main);
   CUTLASS_CHECK(status);
 

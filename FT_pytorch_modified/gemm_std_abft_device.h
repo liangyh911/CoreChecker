@@ -482,7 +482,7 @@ public:
   }
 
   /// Runs the kernel using initialized state.
-  Status run(int if_split_phase, int partition, bool DEBUG, cudaStream_t stream = nullptr) {
+  Status run(int if_split_phase, int partition, int banned_smid, bool DEBUG, cudaStream_t stream = nullptr) {
     
     fs::path destinationFile, fullPath;
     const char* homeDir = nullptr;
@@ -629,7 +629,7 @@ public:
     float t_compute = 0;
 
     cutlass::Kernel_Std_ABFT<GemmKernel><<<grid, block, smem_size, stream>>>(
-      params_, Signature_Array,
+      params_, Signature_Array, banned_smid,
       faulty_smid, d_faulty_MMAs, d_faulty_elements, faulty_bit
     );
 
@@ -921,14 +921,14 @@ public:
   }
 
   /// Runs the kernel using initialized state.
-  Status run(int if_split_phase, int partition, bool DEBUG, cudaStream_t stream = nullptr) {
+  Status run(int if_split_phase, int partition, int banned_smid, bool DEBUG, cudaStream_t stream = nullptr) {
 
-    return underlying_operator_.run(if_split_phase, partition, DEBUG, stream);
+    return underlying_operator_.run(if_split_phase, partition, banned_smid, DEBUG, stream);
   }
 
   /// Runs the kernel using initialized state.
-  Status operator()(int if_split_phase, int partition, bool DEBUG, cudaStream_t stream = nullptr) {
-    return run(if_split_phase, partition, DEBUG, stream);
+  Status operator()(int if_split_phase, int partition, int banned_smid, bool DEBUG, cudaStream_t stream = nullptr) {
+    return run(if_split_phase, partition, banned_smid, DEBUG, stream);
   }
 
   /// Runs the kernel using initialized state.

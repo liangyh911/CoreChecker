@@ -102,7 +102,7 @@ void Kernel(typename Operator::Params params) {
 /// Generic CUTLASS kernel template.
 template <typename Operator>
 CUTLASS_GLOBAL
-void Kernel_Std_ABFT(typename Operator::Params params, uint8_t *Signature_Array,
+void Kernel_Std_ABFT(typename Operator::Params params, uint8_t *Signature_Array, int banned_smid,
                     int faulty_smid, int *faulty_MMAs, int *faulty_elements, int faulty_bit) {
   // Dynamic shared memory base pointer
   extern __shared__ int SharedStorageBase[];
@@ -112,7 +112,7 @@ void Kernel_Std_ABFT(typename Operator::Params params, uint8_t *Signature_Array,
 
   Operator op;
 
-  op(params, *shared_storage, Signature_Array, 
+  op(params, *shared_storage, Signature_Array, banned_smid,
       faulty_smid, faulty_MMAs, faulty_elements, faulty_bit);
   cutlass::arch::synclog_print();
 }
@@ -1908,7 +1908,7 @@ void std_abft_gemm(typename Operator::Params params, int *SM_check_res, uint8_t 
       int update_blk_idx = (col_idx / 256) * params.grid_tiled_shape.m();
       int chksum_smid = *(Signature_Array + update_blk_idx);
 
-      printf("Faulty SM: %d, Update SM: %d, Checker SM: %d\n", target_smid, chksum_smid, smid);
+      // printf("Faulty SM: %d, Update SM: %d, Checker SM: %d\n", target_smid, chksum_smid, smid);
       
       atomicAdd((SM_check_res + target_smid), diff);
       atomicAdd((SM_check_res + smid), diff);
@@ -1971,7 +1971,7 @@ void std_abft_gemm_block(typename Operator::Params params, int checksumblk_per_c
       int target_smid = *(Signature_Array + block_idx);
       int chksum_smid = *(Signature_Array + (ChkColBlkOffset * M_shape));
 
-      printf("Faulty SM: %d, Update SM: %d, Checker SM: %d\n", target_smid, chksum_smid, smid);
+      // printf("Faulty SM: %d, Update SM: %d, Checker SM: %d\n", target_smid, chksum_smid, smid);
 
       atomicAdd((SM_check_res + smid), diff);
       atomicAdd((SM_check_res + target_smid), diff);
@@ -2123,7 +2123,7 @@ void std_abft_bgemm(typename Operator::Params params, uint8_t *Signature_Array, 
     int update_blk_idx = (col_idx / 256) * params.grid_tiled_shape.m();
     int chksum_smid = *(Signature_Array + batch_offset + update_blk_idx);
 
-    printf("Faulty SM: %d, Update SM: %d, Checker SM: %d\n", target_smid, chksum_smid, smid);
+    // printf("Faulty SM: %d, Update SM: %d, Checker SM: %d\n", target_smid, chksum_smid, smid);
 
     atomicAdd((SM_check_res + smid), diff);
     atomicAdd((SM_check_res + target_smid), diff);
@@ -2192,7 +2192,7 @@ void std_abft_bgemm_block(typename Operator::Params params, int checksumblk_per_
       int target_smid = *(Signature_Array + batch_offset + block_idx);
       int chksum_smid = *(Signature_Array + batch_offset + (ChkColBlkOffset * M_shape));
 
-      printf("Faulty SM: %d, Update SM: %d, Checker SM: %d\n", target_smid, chksum_smid, smid);
+      // printf("Faulty SM: %d, Update SM: %d, Checker SM: %d\n", target_smid, chksum_smid, smid);
 
       atomicAdd((SM_check_res + smid), diff);
       atomicAdd((SM_check_res + target_smid), diff);
