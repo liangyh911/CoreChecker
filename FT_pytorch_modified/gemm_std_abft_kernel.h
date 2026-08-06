@@ -382,7 +382,7 @@ struct GemmStdABFT {
     epilogue(output_op, iterator_D, accumulators, iterator_C); 
 
     // Fault Injection
-    if(real_smid == faulty_smid && thread_idx == 0 && banned_smid != faulty_smid){
+    if(real_smid == faulty_smid && thread_idx == 0){
       // int mma_grid_m = params.problem_size.m() / 16;
       // int mma_grid_n = params.problem_size.n() / 8;
       int N = params.problem_size.n();

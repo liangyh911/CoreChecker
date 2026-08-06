@@ -506,8 +506,8 @@ public:
     int num_sms = prop.multiProcessorCount;
     
     int *SM_check_res;
-    cudaMalloc((void**)&SM_check_res, num_sms * sizeof(int));
-    cudaMemset(SM_check_res, 0, num_sms * sizeof(int));
+    cudaMalloc((void**)&SM_check_res, (num_sms+1) * sizeof(int));
+    cudaMemset(SM_check_res, 0, (num_sms+1) * sizeof(int));
 
     ThreadblockSwizzle threadblock_swizzle;
 
@@ -626,7 +626,9 @@ public:
       cudaEventCreate(&stop);
       cudaEventRecord(start, stream);
     }
-    float t_compute = 0;
+    float t_compute = 0, t_check = 0;
+
+    // printf("gemm: banned SM: %d, faulty SM: %d\n", banned_smid, faulty_smid);
 
     cutlass::Kernel_Std_ABFT<GemmKernel><<<grid, block, smem_size, stream>>>(
       params_, Signature_Array, banned_smid,
@@ -643,28 +645,49 @@ public:
 
     if(if_split_phase == 0){
       cudaDeviceSynchronize();
-      cutlass::std_abft_gemm<GemmKernel><<<dim3(params_.grid_tiled_shape.n(), 1, 1), block, 0, stream>>>(params_, SM_check_res, Signature_Array);
+      if(DEBUG){
+        cudaEventRecord(start, stream);
+      }
+      cutlass::std_abft_gemm<GemmKernel, ElementC><<<dim3(params_.grid_tiled_shape.n(), 1, 1), block, 0, stream>>>(params_, SM_check_res, Signature_Array, num_sms);
+      if(DEBUG){
+        cudaEventRecord(stop, stream);
+        cudaEventSynchronize(stop);
+        cudaEventElapsedTime(&t_check, start, stop);
+        destinationFile = fs::path("./control_" + std::string(job_id) + "/" + std::to_string(gpu_dev)) / "time/gemm.txt";
+        recordTime(destinationFile, t_check, true);
+      }
     }
     else if (if_split_phase == 1){
       cudaDeviceSynchronize();
       int checksumblk_per_col = (int)(ceil((double)((partition) / (double)(128))));
-      int matrix_shape_m = params_.grid_tiled_shape.m() - checksumblk_per_col;
+      // int matrix_shape_m = params_.grid_tiled_shape.m() - checksumblk_per_col;
+      int matrix_shape_m = params_.grid_tiled_shape.m();
       int matrix_shape_n = params_.grid_tiled_shape.n();
-      cutlass::std_abft_gemm_block<GemmKernel><<<dim3((matrix_shape_m * matrix_shape_n), 1, 1), block, 0, stream>>>(params_, checksumblk_per_col, SM_check_res, Signature_Array);
+      if(DEBUG){
+        cudaEventRecord(start, stream);
+      }
+      cutlass::std_abft_gemm_block<GemmKernel, ElementC><<<dim3((matrix_shape_m * matrix_shape_n), 1, 1), block, 0, stream>>>(params_, checksumblk_per_col, SM_check_res, Signature_Array);
+      if(DEBUG){
+        cudaEventRecord(stop, stream);
+        cudaEventSynchronize(stop);
+        cudaEventElapsedTime(&t_check, start, stop);
+        destinationFile = fs::path("./control_" + std::string(job_id) + "/" + std::to_string(gpu_dev)) / "time/gemm.txt";
+        recordTime(destinationFile, t_check, true);
+      }
     }
 
     if (injection){
       cudaDeviceSynchronize();
       // // copy back SM check results
       int *h_SM_check_res;
-      h_SM_check_res = (int*)malloc(num_sms * sizeof(int));
-      cudaMemcpy(h_SM_check_res, SM_check_res, num_sms*sizeof(int), cudaMemcpyDeviceToHost);
+      h_SM_check_res = (int*)malloc((num_sms+1) * sizeof(int));
+      cudaMemcpy(h_SM_check_res, SM_check_res, (num_sms+1)*sizeof(int), cudaMemcpyDeviceToHost);
       // record checking results
       fs::path SMCheckResPath = fs::path("/home/yuhangl/control_" + std::string(job_id) + "/" + std::to_string(gpu_dev)) / "SM_checking_results.txt";
       std::ofstream ofs(SMCheckResPath, std::ios::out | std::ios::app);
-      for (int i = 0; i < num_sms; i++) {
+      for (int i = 0; i < (num_sms+1); i++) {
           ofs << h_SM_check_res[i];
-          if (i != num_sms - 1)
+          if (i != (num_sms+1) - 1)
               ofs << " ";   // 空格分隔
       }
       ofs << "\n";          // 换行
