@@ -2502,6 +2502,8 @@ class Trainer:
         perform_Rec_Val = False
 
         enable_core_checker = False
+        enable_std_abft = False
+        enable_blk_abft = False
 
         loss_ema = None
         alpha_ema = 0.02
@@ -2527,8 +2529,10 @@ class Trainer:
             flag = file.read()
             if flag == 't':
                 enable_core_checker = True
-            else:
-                enable_core_checker = False
+            elif flag == 's':
+                enable_std_abft = True
+            elif flag == 'a':
+                enable_blk_abft = True
 
         # target loss at step 500
         model_name = model.config.name_or_path
@@ -2614,11 +2618,19 @@ class Trainer:
                 # if len(faulty_steps_list) != 0:
                 #     faulty_step = faulty_steps_list[0]
                 # total_fi_steps = faulty_step + faulty_duration
-
-                if (enable_core_checker) and (global_steps % core_checker_freq == 0):
+                perform_detection = (global_steps % core_checker_freq == 0)
+                if enable_core_checker and perform_detection:
                     with open(SMChkFP, 'w') as file:
                         file.truncate(0)
                         file.write('t')
+                elif enable_std_abft and perform_detection:
+                    with open(SMChkFP, 'w') as file:
+                        file.truncate(0)
+                        file.write('s')
+                elif enable_blk_abft and perform_detection:
+                    with open(SMChkFP, 'w') as file:
+                        file.truncate(0)
+                        file.write('a')
                 else:
                     with open(SMChkFP, 'w') as file:
                         file.truncate(0)
@@ -2846,7 +2858,7 @@ class Trainer:
                                 # record current steps
                                 logFP = f"./control_{job_id}/0/output.log"
                                 with open(logFP, "a") as file:
-                                    file.write(f"{global_steps}\n")
+                                    file.write(f"\n{global_steps}\n")
                                 # delete remaining faulty plan items
                                 remaining_iter = total_FI_iter - faulty_steps_count
                                 with open(PlanFP, "r") as file:
@@ -2856,16 +2868,23 @@ class Trainer:
                                     file.writelines(lines)
                                 break
 
-                            if global_steps >= 499 and loss_ema <= target_ema_loss:
+                            # if global_steps >= 499 and loss_ema <= target_ema_loss:
+                            if global_steps == 499:
                                 print(f"break the epoch loop, ema loss: {loss_ema}, step: {global_steps}, baseline {target_ema_loss}")
                                 # addition_epoch = global_steps
                                 should_exit = True
                                 # record current steps
                                 logFP = f"./control_{job_id}/0/output.log"
                                 with open(logFP, "a") as file:
-                                    file.write(f"{global_steps}\n")
+                                    file.write(f"\n{global_steps}\n")
 
                                 break
+                            
+                            if global_steps == 999:
+                                logFP = f"./control_{job_id}/0/output.log"
+                                with open(logFP, "a") as file:
+                                    file.write(f"\n{global_steps}\n")
+
                         else:
                             if global_steps == 499:
                                 print(f"baseline EMA loss :{loss_ema}")
