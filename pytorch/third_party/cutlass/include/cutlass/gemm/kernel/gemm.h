@@ -960,7 +960,7 @@ struct Gemm {
     // }
 
     // fault injection
-    cooperative_groups::this_grid().sync();
+    if (faulty_smid != -1) cooperative_groups::this_grid().sync();
     
     // __syncthreads();
 

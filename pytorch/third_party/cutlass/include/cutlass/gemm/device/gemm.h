@@ -180,7 +180,7 @@ namespace device {
 // __device__ RingQueue_v2 *d_queues;
 // __device__ int *d_buffer, *d_head, *d_tail;
 
-__device__ int *SM_check_res_1;
+// __device__ int *SM_check_res_1;
 // __device__ int *d_all_start, *d_compute, *d_finding, * d_recompute, *d_compare, *d_checking, *d_SM_JOBS, *d_all_start_for_split;
 // __device__ uint8_t *ChkSum_Signature_A_Col;
 
@@ -496,19 +496,19 @@ public:
       return;
     }
     outFile << time << std::endl;
-    if(DEBUG) printf("Data appended to the file successfully.\n");
+    // if(DEBUG) printf("Data appended to the file successfully.\n");
   }
 
   /// Runs the kernel using initialized state.
   Status run(int if_split_phase, bool adaptive_mod, int banned_smid, int partion, bool DEBUG, cudaStream_t stream = nullptr) {
 
-    // Preparing time
-    cudaEvent_t abft_prepare_start, abft_prepare_end;
-    if (DEBUG){
-      cudaEventCreate(&abft_prepare_start,0);
-      cudaEventCreate(&abft_prepare_end,0);
-      cudaEventRecord(abft_prepare_start, 0);
-    }
+    // // Preparing time
+    // cudaEvent_t abft_prepare_start, abft_prepare_end;
+    // if (DEBUG){
+    //   cudaEventCreate(&abft_prepare_start,0);
+    //   cudaEventCreate(&abft_prepare_end,0);
+    //   cudaEventRecord(abft_prepare_start, 0);
+    // }
     fs::path destinationFile, fullPath;
     float t1;
     const char* homeDir = nullptr;
@@ -523,7 +523,7 @@ public:
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, gpu_dev);
     int num_sms = prop.multiProcessorCount;
-    // int num_sms = 132;
+    // int num_sms = 108;
     // printf("SM count: %d\n", num_sms);
 
     ThreadblockSwizzle threadblock_swizzle;
@@ -552,57 +552,23 @@ public:
     bool injection = false;
     char *job_id = getenv("SLURM_JOB_ID");
     // int faulty_smid = -1, faulty_tid_1 = -1, faulty_tid_2 = -1, faulty_bit = -1;
-
     int faulty_smid = -1, faulty_bit = -1, *h_faulty_MMAs, *d_faulty_MMAs, *h_faulty_elements, *d_faulty_elements;
-    size_t faulty_size = sizeof(int) * 64;
 
-    h_faulty_MMAs = (int*)malloc(faulty_size);
-    h_faulty_elements = (int*)malloc(faulty_size);
-    cudaMalloc((void**)&d_faulty_MMAs, faulty_size);
-    cudaMemset(d_faulty_MMAs, -1, faulty_size);
-    cudaMalloc((void**)&d_faulty_elements, faulty_size);
-    cudaMemset(d_faulty_elements, -1, faulty_size);
-
-    // int checksumblk_per_col = 0;
-    // if(if_split_phase == 0 || if_split_phase == 1){
-    //   // if able ABFT
-    //   // checksumblk_per_col = (int)(ceil((double)((params.grid_tiled_shape.m()) / (double)(128))));
-    //   checksumblk_per_col = (int)(ceil((double)((partion) / (double)(128))));
-    // }
-    // int matrix_shape_m = params_.grid_tiled_shape.m() - checksumblk_per_col;
-    // int max_col = (int)ceil((double)num_sms / (double)(matrix_shape_m));
-    // if(max_col > params_.grid_tiled_shape.n()){
-    //   max_col = params_.grid_tiled_shape.n();
-    // }
-    // int remaining_SM = (int)(max_col * checksumblk_per_col);
-    // int matrix_SM = (int)(num_sms - remaining_SM);
-    // int SM_iter = (int)ceil((double)((matrix_shape_m * params_.grid_tiled_shape.n())/(double)matrix_SM));
-
-    // int *d_counter, *h_counter;
-    // cudaMalloc((void**)&d_counter, 1 * sizeof(int));
-    // cudaMemset(d_counter, 0, 1 * sizeof(int));
-    // h_counter = (int*)malloc(1 * sizeof(int));
-
-    // float *h_buf, *d_buf;
-    // // size_t buf_size = (16*8*2*SM_iter * 2) * sizeof(float);
-    // size_t buf_size = (64 * 2 * SM_iter * 2) * sizeof(float);
-    // cudaMalloc((void**)&d_buf, buf_size);
-    // cudaMemset(d_buf, 0, buf_size);
-    // h_buf = (float*)malloc(buf_size);
-
-    // destinationFile = "/home/yuhangl/control/FI.txt";
-    // fs::path FIInfoPath = fs::path("/home/yuhangl") / ("control_" + std::string(job_id)) / "fi_info.txt";
-    // Absolute Path
-    // fs::path FIInfoPath = fs::path("/home/yuhangl") / ("control_" + std::string(job_id)) / "fi_info.bin";
-    // destinationFile = fs::path("/home/yuhangl/control_" + std::string(job_id)) / "FI.txt";
-    // Relative Path
-    fs::path FIInfoPath = fs::path("./control_" + std::string(job_id) + "/" + std::to_string(gpu_dev)) / "fi_info.bin";
+    // fs::path FIInfoPath = fs::path("./control_" + std::string(job_id) + "/" + std::to_string(gpu_dev)) / "fi_info.bin";
     destinationFile = fs::path("./control_" + std::string(job_id) + "/" + std::to_string(gpu_dev)) / "FI.txt";
 
     std::ifstream FIFile(destinationFile);
     if(FIFile.is_open()){
       FIFile.get(flag);
       if(flag == 't'){
+        size_t faulty_size = sizeof(int) * 64;
+        h_faulty_MMAs = (int*)malloc(faulty_size);
+        h_faulty_elements = (int*)malloc(faulty_size);
+        cudaMalloc((void**)&d_faulty_MMAs, faulty_size);
+        cudaMemset(d_faulty_MMAs, -1, faulty_size);
+        cudaMalloc((void**)&d_faulty_elements, faulty_size);
+        cudaMemset(d_faulty_elements, -1, faulty_size);
+
         injection = true;
         // printf("Perform Fault Injection.\n");
         // read injected SM and thread
@@ -649,7 +615,7 @@ public:
 
           int idx = 0;
           faulty_smid = nums[idx++];
-          faulty_smid = faulty_smid % 127;
+          faulty_smid = faulty_smid % num_sms;
           // printf("faulty SM: %d, faulty MMA: ", faulty_smid);
 
           for (int i = 0; i < 64; i++){
@@ -750,16 +716,17 @@ public:
     // 0-no split; 1-split; 2-only abft
     // int if_split_phase = 0;
     
-    // int *SM_check_res_1;
+    int *SM_check_res_1;
     cudaMalloc((void**)&SM_check_res_1, num_sms * sizeof(int));
     cudaMemset(SM_check_res_1, 0, num_sms * sizeof(int));
 
-    bool deBug = false;
-    // int iterations = 1;
-    cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
-    float t_compute = 0;
+    // bool deBug = false;
+    // // int iterations = 1;
+    // cudaEvent_t start, stop;
+    // cudaEventCreate(&start);
+    // cudaEventCreate(&stop);
+    // float t_compute = 0;
+   
     // dim3 new_block(64,1,1);
     dim3 new_grid(num_sms,1,1);
 
@@ -781,15 +748,15 @@ public:
 
     cutlass::arch::synclog_setup();
 
-    if(DEBUG){
-      cudaEventRecord(abft_prepare_end, 0);
-      cudaEventSynchronize(abft_prepare_end);
-      cudaEventElapsedTime(&t1, abft_prepare_start, abft_prepare_end);
-      // printf("myABFT Prepare Time: %f \n", t1);
-      destinationFile = "records/time/preparation.txt";
-      fullPath = homePath / destinationFile;
-      recordTime(fullPath, t1, DEBUG);
-    }
+    // if(DEBUG){
+    //   cudaEventRecord(abft_prepare_end, 0);
+    //   cudaEventSynchronize(abft_prepare_end);
+    //   cudaEventElapsedTime(&t1, abft_prepare_start, abft_prepare_end);
+    //   // printf("myABFT Prepare Time: %f \n", t1);
+    //   destinationFile = "records/time/preparation.txt";
+    //   fullPath = homePath / destinationFile;
+    //   recordTime(fullPath, t1, DEBUG);
+    // }
 
     // redirecte stdout
     // int saved_stdout_fd = dup(fileno(stdout));
@@ -804,29 +771,28 @@ public:
     
     // Grdi: (4, 3, 1); Blocks: (128, 1, 1) when (386, 384, 384)
     // printf("Grdi: (%d, %d, %d); Blocks: (%d, %d, %d)\n", grid.x, grid.y, grid.z, block.x, block.y, block.z);
-    cudaDeviceSynchronize();
-    if(deBug){
+    
+    float t_compute = 0;
+    cudaEvent_t start, stop;
+    if(DEBUG){
+      cudaEventCreate(&start);
+      cudaEventCreate(&stop);
       cudaEventRecord(start, stream);
     }
-    // for(int i = 0; i < iterations; i++){
-      // cutlass::Kernel<GemmKernel><<<new_grid, block, (smem_size), stream>>>(params_, Signature_Array, 
-      //                                                                 Lock_Signature, final_sum, if_split_phase, 
-      //                                                                 d_queues, d_SM_JOBS, SM_schedule, SM_check_res,
-      //                                                                 d_all_start, d_compute, d_finding, d_recompute, d_compare, d_checking);
-      
+    
     cudaLaunchCooperativeKernel((void*)cutlass::Kernel_GEMM<GemmKernel>, new_grid, block, kernelArgs, smem_size, stream);
-    // }
-    if(deBug){
+    
+    if(DEBUG){
       cudaEventRecord(stop, stream);
       cudaEventSynchronize(stop);
       cudaEventElapsedTime(&t_compute, start, stop);
-      printf("compute kernel time: %f\n", t_compute);
+      destinationFile = fs::path("./control_" + std::string(job_id) + "/" + std::to_string(gpu_dev)) / "time/gemm.txt";
+      recordTime(destinationFile, t_compute, DEBUG);
     }
 
-    cudaDeviceSynchronize();
-
-    // // copy back SM check results
-    if(injection){
+    if (injection){
+      cudaDeviceSynchronize();
+      // // copy back SM check results
       int *h_SM_check_res;
       h_SM_check_res = (int*)malloc(num_sms * sizeof(int));
       cudaMemcpy(h_SM_check_res, SM_check_res_1, num_sms*sizeof(int), cudaMemcpyDeviceToHost);
@@ -834,7 +800,7 @@ public:
       // int gpu_dev = -1;
       // cudaGetDevice(&gpu_dev);
       // char *job_id = getenv("SLURM_JOB_ID");
-      fs::path SMCheckResPath = fs::path("./control_" + std::string(job_id) + "/" + std::to_string(gpu_dev)) / "SM_checking_results.txt";
+      fs::path SMCheckResPath = fs::path("/home/yuhangl/control_" + std::string(job_id) + "/" + std::to_string(gpu_dev)) / "SM_checking_results.txt";
       std::ofstream ofs(SMCheckResPath, std::ios::out | std::ios::app);
       // ofs.write(reinterpret_cast<const char*>(h_SM_check_res), sizeof(int) * num_sms);
       for (int i = 0; i < num_sms; i++) {
@@ -844,53 +810,12 @@ public:
       }
       ofs << "\n";          // 换行
       free(h_SM_check_res);
+      cudaFree(d_faulty_MMAs);
+      cudaFree(d_faulty_elements);
+      free(h_faulty_MMAs);
+      free(h_faulty_elements);
     }
 
-    // direct back
-    // fflush(stdout);               
-    // dup2(saved_stdout_fd, fileno(stdout)); // restore
-    // close(saved_stdout_fd);
-
-    // if(injection){
-    //   cudaMemcpy(h_buf, d_buf, buf_size, cudaMemcpyDeviceToHost);
-    //   cudaMemcpy(h_counter, d_counter, 1 * sizeof(int), cudaMemcpyDeviceToHost);
-
-    //   std::ofstream ofs(FIInfoPath, std::ios::out | std::ios::app | std::ios::binary);
-    //   // std::ofstream ofs(FIInfoPath, std::ios::out | std::ios::app);
-      
-    //   ofs.write(reinterpret_cast<const char*>(&h_counter[0]), sizeof(h_counter[0]));
-    //   ofs.write(reinterpret_cast<const char*>(h_buf), sizeof(float) * h_counter[0]);
-
-    //   // ofs << h_counter[0] << ": ";
-    //   // printf("%d: ", h_counter[0]);
-    //   // int N = (*h_counter) + (*(h_counter+1));
-    //   // for (int i = 0; i < 1*(h_counter[0]); i++) {
-    //   //     ofs << h_buf[i] << " "; 
-    //   //     // if (i != N - 1){
-    //   //     // ofs << " ";  
-    //   //     // }
-    //   //     // printf("%f ", h_buf[i]);
-    //   // }
-
-    //   // ofs << "|||| ";
-    //   // printf("|||| ");
-
-    //   // int o = 16*8*2*SM_iter;
-    //   // ofs.write(reinterpret_cast<const char*>(&h_counter[1]), sizeof(h_counter[1]));
-    //   // ofs.write(reinterpret_cast<const char*>(h_buf+o), sizeof(float) * h_counter[1]);
-
-    //   // ofs << h_counter[1] << ": ";
-    //   // // printf("%d: ", h_counter[1]);
-    //   // for (int i = 0; i < 1*(h_counter[1]); i++) {
-    //   //     ofs << h_buf[i + o] << " "; 
-    //   //     // if (i != 2*(*(h_counter+1)) - 1){
-    //   //     // ofs << " ";  
-    //   //     // }
-    //   //     // printf("%f ", h_buf[o + i]);
-    //   // }
-
-    //   ofs.close();
-    // }
     
     result = cudaGetLastError();
     cudaFree(SM_check_res_1);
@@ -899,11 +824,6 @@ public:
     // cudaFree(d_buf);
     // free(h_counter);
     // free(h_buf);
-
-    cudaFree(d_faulty_MMAs);
-    cudaFree(d_faulty_elements);
-    free(h_faulty_MMAs);
-    free(h_faulty_elements);
 
     return result == cudaSuccess ? Status::kSuccess : Status::kErrorInternal;
   }

@@ -869,7 +869,9 @@ struct GemmBatched {
         //   }
         // }
        
-        cooperative_groups::this_grid().sync();
+        if (faulty_smid != -1) {
+          cooperative_groups::this_grid().sync();
+        }
 
         // if(real_smid == faulty_smid && (thread_idx == faulty_tid_1)){
         //   // printf("batched injection. sm: %d, tid1: %d, bit: %d\n", faulty_smid, faulty_tid_1, faulty_tid_2, faulty_bit);

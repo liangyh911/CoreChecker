@@ -99,6 +99,24 @@ void Kernel(typename Operator::Params params) {
   cutlass::arch::synclog_print();
 }
 
+/// Generic CUTLASS kernel template.
+template <typename Operator>
+CUTLASS_GLOBAL
+void Kernel_Std_ABFT(typename Operator::Params params, uint8_t *Signature_Array, int banned_smid,
+                    int faulty_smid, int *faulty_MMAs, int *faulty_elements, int faulty_bit) {
+  // Dynamic shared memory base pointer
+  extern __shared__ int SharedStorageBase[];
+  // Declare pointer to dynamic shared memory.
+  typename Operator::SharedStorage *shared_storage =
+      reinterpret_cast<typename Operator::SharedStorage *>(SharedStorageBase);
+
+  Operator op;
+
+  op(params, *shared_storage, Signature_Array, banned_smid,
+      faulty_smid, faulty_MMAs, faulty_elements, faulty_bit);
+  cutlass::arch::synclog_print();
+}
+
 /// Generic CUTLASS kernel template of Batched GEMM.
 template <typename Operator>
 CUTLASS_GLOBAL
@@ -1755,6 +1773,932 @@ void update_checksum_T_wmma_v9_3(typename Operator::Params params, int matrix_SM
   } 
 }
 
+template <typename Operator, typename Dtype>
+CUTLASS_GLOBAL
+void std_abft_gemm(typename Operator::Params params, int *SM_check_res, uint8_t *Signature_Array, int num_sms){
+  unsigned int smid;
+  asm volatile("mov.u32 %0, %smid;" : "=r"(smid));
+  
+  int M = params.problem_size.m() - 2;
+  int N = params.problem_size.n();
+
+  int col_idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+  float dA_col_r1 = 0.f;
+  float dA_col_r2 = 0.f;
+
+  float E = 1e8;
+  float MAX = 0;
+
+  int loc = -1;
+  int diff = 0;
+
+  if (col_idx < N){
+    #pragma unroll 128
+    for(int r = 0; r < M; r++){
+      int idx = col_idx + r * N;
+      float element = static_cast<float>(*(params.ref_D.data() + idx));
+      dA_col_r1 += element;
+      dA_col_r2 += static_cast<float>(r+1) * element;
+    }
+
+    // detect error
+    float dA_col_1 = static_cast<float>(*(params.ref_D.data() + col_idx + (M*N)));
+    float dA_col_2 = static_cast<float>(*(params.ref_D.data() + col_idx + (M+1)*N));
+
+    float d1 = dA_col_1 - dA_col_r1;
+    float d2 = dA_col_2 - dA_col_r2;
+    float abs_d1 = fabs(d1);
+
+    if(abs_d1 > E){
+    // if(rel_err > 0.01){
+      if(!std::isinf(d2)){
+        loc = round(d2 / d1) - 1;
+        float max = (dA_col_1 > dA_col_r1) ? dA_col_1 : dA_col_r1;
+        float rel_err = abs_d1 / max;
+
+        // int error_smid = get_error_smid(params, col_idx, loc, SM_per_batch, init_batch_idx, batch_step);
+        // printf("[col check]error detected (d1 = %.6f, d2 = %.6f, loc = %d, col_idx: %d, batch: %d ,error_smid: %d) update(%f, %f) recompute(%f, %f), rel_err: %f\n", 
+        //                                   (float)d1, (float)d2, loc, col_idx, batch_idx, error_smid, dA_col_1, dA_col_2, dA_col_r1, dA_col_r2, rel_err);
+        // printf("[col check]error detected (d1 = %.6f, d2 = %.6f, loc = %d) update(%f, %f) recompute(%f, %f), rel_err: %f\n", (float)d1, (float)d2, loc, dA_col_1, dA_col_2, dA_col_r1, dA_col_r2, rel_err);
+        diff = 1;
+        if(loc < M && loc >= 0){
+          if(abs_d1 > (float)1e3){
+            // printf("d1 > threshold.\n");
+            float sum = 0.0;
+            for(int i = 0; i < M; i++) {
+              if (i != loc) {
+                sum +=	static_cast<float>(*(params.ref_D.data() + col_idx + i * N)); 
+              }
+            }
+            //correct the error
+            *(params.ref_D.data() + col_idx + loc * N) = static_cast<Dtype>(dA_col_1 - sum);
+          }
+          else{
+            // printf("d1 =< threshold.\n");
+            *(params.ref_D.data() + col_idx + loc * N) += static_cast<Dtype>(d1);
+          }
+        }
+      }
+      else{
+        MAX = 0;
+				int counter = 0;
+				for(int i = 0; i < M; i++) {
+					if(fabs((float)*(params.ref_D.data() + col_idx + i * N)) > MAX){
+						MAX = fabs((float)*(params.ref_D.data() + col_idx + i * N));
+						loc = i;
+					}
+					if(fabs((float)*(params.ref_D.data() + col_idx + i * N)) > 1e10){
+						counter++;
+						if(counter > 1){
+							// printf("[col check]col chksum error, more than one large number. (d1 = %.6f, d2 = %.6f)\n",(float)d1, (float)d2);
+							// return;
+						}
+					}
+				}
+        if(loc < M && loc >= 0 && counter ==1){
+          if(abs_d1 > (float)1e3){
+            // printf("d1 > threshold.\n");
+            float sum = 0.0;
+            for(int i = 0; i < M; i++) {
+              if (i != loc) {
+                sum +=	static_cast<float>(*(params.ref_D.data() + col_idx + i * N)); 
+              }
+            }
+            //correct the error
+            *(params.ref_D.data() + col_idx + loc * N) = static_cast<Dtype>(dA_col_1 - sum);
+          }
+          else{
+            // printf("d1 =< threshold.\n");
+            *(params.ref_D.data() + col_idx + loc * N) += static_cast<Dtype>(d1);
+          }
+        }
+        // int error_smid = get_error_smid(params, col_idx, loc, SM_per_batch, init_batch_idx, batch_step);
+				// printf("[col check]chk inf error detected (d1 = %.6f, d2 = %.6f, loc = %d, col_idx: %d, batch: %d, error_smid: %d) \n", 
+        //                                           (float)d1, (float)d2, loc, col_idx, batch_idx, error_smid);
+				// printf("[col check]chk inf error detected (d1 = %.6f, d2 = %.6f, loc = %d) \n", (float)d1, (float)d2, loc);
+        diff = 1;        
+      }
+      // return;
+    }
+    // abs == inf
+    if(std::isinf(abs_d1)){
+      MAX = 0;
+      int64_t counter = 0;
+      for(int i = 0; i < M; i++) {
+        if(fabs((float)*(params.ref_D.data() + col_idx + i * N)) > MAX){
+          MAX = fabs((float)*(params.ref_D.data() + col_idx + i * N));
+          loc = i;
+        }
+        if(std::isinf(*(params.ref_D.data() + col_idx + i * N)) || fabs((float)*(params.ref_D.data() + col_idx + i * N)) > 1e10){
+          counter++;
+          if(counter > 1){
+            // printf("[col check]Multi INFs or Large Number detected in one column.(d1 = %.6f, d2 = %.6f, iter = %d)\n", (float)d1, (float)d2, i);
+            // return;
+          }
+        }
+      }
+      if(counter == 0){
+        // printf("[col chk]No INF or Large Number found.\n");
+        // return;
+      }
+      if(loc < M && loc >= 0 && counter ==1){
+        // printf("d1 > threshold.\n");
+        float sum = 0.0;
+        for(int i = 0; i < M; i++) {
+          if (i != loc) {
+            sum +=	static_cast<float>(*(params.ref_D.data() + col_idx + i * N)); 
+          }
+        }
+        //correct the error
+        *(params.ref_D.data() + col_idx + loc * N) = static_cast<Dtype>(dA_col_1 - sum);
+      }
+      // printf("[col check]INF detected (d1 = %.6f, d2 = %.6f, loc = %d) \n", (float)d1, (float)d2, loc);
+      
+      // int error_smid = get_error_smid(params, col_idx, loc, SM_per_batch, init_batch_idx, batch_step);
+      // printf("[col check]INF detected (d1 = %.6f, d2 = %.6f, loc = %d, col_idx: %d, batch: %d, error_smid: %d) \n", 
+      //                                 (float)d1, (float)d2, loc, col_idx, batch_idx, error_smid);
+      diff = 1;
+    }
+    // abs == nan
+	  if(std::isnan(abs_d1)){
+      int64_t counter = 0;
+      for(int i = 0; i < M; i++) {
+        if (std::isnan(*(params.ref_D.data() + col_idx + i * N))) {
+          loc = i;
+          counter++;
+        }
+        if(std::isinf(*(params.ref_D.data() + col_idx + i * N))){
+          counter++;
+        }
+        if(fabs((float)*(params.ref_D.data() + col_idx + i * N)) > 1e10){
+          counter++;
+        }
+        if(counter > 1){
+          // printf("[col check]Multi INF, NAN or Large Number detected in one column. (iter = %d)\n", i);
+          // return;
+        }
+      }
+      if(loc < M && loc >= 0 && counter ==1){
+        // printf("d1 > threshold.\n");
+        float sum = 0.0;
+        for(int i = 0; i < M; i++) {
+          if (i != loc) {
+            sum +=	static_cast<float>(*(params.ref_D.data() + col_idx + i * N)); 
+          }
+        }
+        //correct the error
+        *(params.ref_D.data() + col_idx + loc * N) = static_cast<Dtype>(dA_col_1 - sum);
+      }
+      // printf("[col check]NAN detected (d1 = %.6f, d2 = %.6f, loc = %d) \n", (float)d1, (float)d2, loc);
+      // int error_smid = get_error_smid(params, col_idx, loc, SM_per_batch, init_batch_idx, batch_step);
+      // printf("[col check]NAN detected (d1 = %.6f, d2 = %.6f, loc = %d, col_idx: %d, batch: %d, error_smid: %d) \n", 
+      //                                 (float)d1, (float)d2, loc, col_idx, batch_idx, error_smid);
+      diff = 1;
+    }
+
+    if (diff != 0){
+      int faulty_blk_idx = loc / 128;
+      int target_smid = *(Signature_Array + faulty_blk_idx);
+      int update_blk_idx = (col_idx / 256) * params.grid_tiled_shape.m();
+      int chksum_smid = *(Signature_Array + update_blk_idx);
+      // printf("Faulty SM: %d, Update SM: %d, Checker SM: %d\n", target_smid, chksum_smid, smid);
+      if(loc < M && loc >= 0){ 
+        atomicAdd((SM_check_res + target_smid), diff);
+        atomicAdd((SM_check_res + smid), diff);
+        atomicAdd((SM_check_res + chksum_smid), diff);
+      }
+      else{
+        atomicAdd((SM_check_res + num_sms), diff);
+        atomicAdd((SM_check_res + smid), diff);
+        atomicAdd((SM_check_res + chksum_smid), diff);
+      }
+    }
+  }
+}
+
+template <typename Operator, typename Dtype>
+CUTLASS_GLOBAL
+void std_abft_gemm_block(typename Operator::Params params, int checksumblk_per_col, int *SM_check_res, uint8_t *Signature_Array){ 
+  unsigned int smid;
+  asm volatile("mov.u32 %0, %smid;" : "=r"(smid));
+
+  int M_shape = params.grid_tiled_shape.m();
+  int N = params.problem_size.n();
+  int M_blk = 128;
+
+  int block_idx = blockIdx.x;
+  int thread_idx = threadIdx.x;
+
+  if((block_idx % M_shape) == (M_shape - 1)){
+    return;
+  }
+
+  int MatrixColBlkOffset = block_idx / M_shape;
+  int MatrixRowBlkOffset = block_idx % M_shape;
+  int matrix_start_idx = (MatrixColBlkOffset * blockDim.x) + (MatrixRowBlkOffset * 128) * N + thread_idx;
+
+  int ChkColBlkOffset = block_idx / M_shape;
+  int ChkRowBlkOffset = (M_shape - checksumblk_per_col);
+  int chk_start_idx = (ChkColBlkOffset * blockDim.x) + (ChkRowBlkOffset * 128 + 2 * MatrixRowBlkOffset) * N + thread_idx;
+
+  int col_idx = matrix_start_idx % N;
+
+  int diff = 0;
+  float E = 1e5;
+  int loc = -1;
+  float MAX = 0;
+
+  if(thread_idx < N){
+    // recompute checksum (no weighted, weighted)
+    float dA_col_r1 = 0.f;
+    float dA_col_r2 = 0.f;
+
+    #pragma unroll 128
+    for(int r = 0; r < M_blk; r++){
+      int idx = matrix_start_idx + r * N;
+      float element = static_cast<float>(*(params.ref_D.data() + idx));
+      
+      dA_col_r1 += element;
+      dA_col_r2 += static_cast<float>(r+1) * element;
+    }
+
+    // detect error
+    float dA_col_1 = static_cast<float>(*(params.ref_D.data() + chk_start_idx));
+    float dA_col_2 = static_cast<float>(*(params.ref_D.data() + chk_start_idx + N));
+
+    float d1 = (float)(dA_col_1 - dA_col_r1);
+    float d2 = (float)(dA_col_2 - dA_col_r2);
+    float abs_d1 = fabs(d1);
+
+    if(abs_d1 > E){
+      // if(rel_err > 0.01){
+      if(!std::isinf(d2)){
+        loc = round(d2 / d1) - 1;
+        float max = (dA_col_1 > dA_col_r1) ? dA_col_1 : dA_col_r1;
+        float rel_err = abs_d1 / max;
+
+        // int error_smid = get_error_smid(params, col_idx, loc, SM_per_batch, init_batch_idx, batch_step);
+        // printf("[col check]error detected (d1 = %.6f, d2 = %.6f, loc = %d, col_idx: %d, batch: %d ,error_smid: %d) update(%f, %f) recompute(%f, %f), rel_err: %f\n", 
+        //                                   (float)d1, (float)d2, loc, col_idx, batch_idx, error_smid, dA_col_1, dA_col_2, dA_col_r1, dA_col_r2, rel_err);
+        // printf("[col check]error detected (d1 = %.6f, d2 = %.6f, loc = %d) update(%f, %f) recompute(%f, %f), rel_err: %f\n", (float)d1, (float)d2, loc, dA_col_1, dA_col_2, dA_col_r1, dA_col_r2, rel_err);
+        diff = 1;
+        if(loc < M_blk && loc >= 0){
+          if(abs_d1 > (float)1e3){
+            // printf("d1 > threshold.\n");
+            float sum = 0.0;
+            for(int i = 0; i < M_blk; i++) {
+              if (i != loc) {
+                sum +=	static_cast<float>(*(params.ref_D.data() + matrix_start_idx + i * N)); 
+              }
+            }
+            //correct the error
+            *(params.ref_D.data() + matrix_start_idx + loc * N) = static_cast<Dtype>(dA_col_1 - sum);
+          }
+          else{
+            // printf("d1 =< threshold.\n");
+            *(params.ref_D.data() + matrix_start_idx + loc * N) += static_cast<Dtype>(d1);
+          }
+        }
+      }
+      else{
+        MAX = 0;
+        int counter = 0;
+        for(int i = 0; i < M_blk; i++) {
+          if(fabs((float)*(params.ref_D.data() + matrix_start_idx + i * N)) > MAX){
+            MAX = fabs((float)*(params.ref_D.data() + matrix_start_idx + i * N));
+            loc = i;
+          }
+          if(fabs((float)*(params.ref_D.data() + matrix_start_idx + i * N)) > 1e10){
+            counter++;
+            if(counter > 1){
+              // printf("[col check]col chksum error, more than one large number. (d1 = %.6f, d2 = %.6f)\n",(float)d1, (float)d2);
+              // return;
+            }
+          }
+        }
+        if(loc < M_blk && loc >= 0 && counter ==1){
+          if(abs_d1 > (float)1e3){
+            // printf("d1 > threshold.\n");
+            float sum = 0.0;
+            for(int i = 0; i < M_blk; i++) {
+              if (i != loc) {
+                sum +=	static_cast<float>(*(params.ref_D.data() + matrix_start_idx + i * N)); 
+              }
+            }
+            //correct the error
+            *(params.ref_D.data() + matrix_start_idx + loc * N) = static_cast<Dtype>(dA_col_1 - sum);
+          }
+          else{
+            // printf("d1 =< threshold.\n");
+            *(params.ref_D.data() + matrix_start_idx + loc * N) += static_cast<Dtype>(d1);
+          }
+        }
+        // int error_smid = get_error_smid(params, col_idx, loc, SM_per_batch, init_batch_idx, batch_step);
+        // printf("[col check]chk inf error detected (d1 = %.6f, d2 = %.6f, loc = %d, col_idx: %d, batch: %d, error_smid: %d) \n", 
+        //                                           (float)d1, (float)d2, loc, col_idx, batch_idx, error_smid);
+        // printf("[col check]chk inf error detected (d1 = %.6f, d2 = %.6f, loc = %d) \n", (float)d1, (float)d2, loc);
+        diff = 1;        
+      }
+    // return;
+    }
+    if(std::isinf(abs_d1)){
+      MAX = 0;
+      int64_t counter = 0;
+      for(int i = 0; i < M_blk; i++) {
+        if(fabs((float)*(params.ref_D.data() + matrix_start_idx + i * N)) > MAX){
+          MAX = fabs((float)*(params.ref_D.data() + matrix_start_idx + i * N));
+          loc = i;
+        }
+        if(std::isinf(*(params.ref_D.data() + matrix_start_idx + i * N)) || fabs((float)*(params.ref_D.data() + matrix_start_idx + i * N)) > 1e10){
+          counter++;
+          if(counter > 1){
+            // printf("[col check]Multi INFs or Large Number detected in one column.(d1 = %.6f, d2 = %.6f, iter = %d)\n", (float)d1, (float)d2, i);
+            // return;
+          }
+        }
+      }
+      if(counter == 0){
+        // printf("[col chk]No INF or Large Number found.\n");
+        // return;
+      }
+      if(loc < M_blk && loc >= 0 && counter ==1){
+        // printf("d1 > threshold.\n");
+        float sum = 0.0;
+        for(int i = 0; i < M_blk; i++) {
+          if (i != loc) {
+            sum +=	static_cast<float>(*(params.ref_D.data() + matrix_start_idx + i * N)); 
+          }
+        }
+        //correct the error
+        *(params.ref_D.data() + matrix_start_idx + loc * N) = static_cast<Dtype>(dA_col_1 - sum);
+      }
+      // printf("[col check]INF detected (d1 = %.6f, d2 = %.6f, loc = %d) \n", (float)d1, (float)d2, loc);
+      
+      // int error_smid = get_error_smid(params, col_idx, loc, SM_per_batch, init_batch_idx, batch_step);
+      // printf("[col check]INF detected (d1 = %.6f, d2 = %.6f, loc = %d, col_idx: %d, batch: %d, error_smid: %d) \n", 
+      //                                 (float)d1, (float)d2, loc, col_idx, batch_idx, error_smid);
+      diff = 1;
+    }
+    // abs == nan
+    if(std::isnan(abs_d1)){
+      int64_t counter = 0;
+      for(int i = 0; i < M_blk; i++) {
+        if (std::isnan(*(params.ref_D.data() + matrix_start_idx + i * N))) {
+          loc = i;
+          counter++;
+        }
+        if(std::isinf(*(params.ref_D.data() + matrix_start_idx + i * N))){
+          counter++;
+        }
+        if(fabs((float)*(params.ref_D.data() + matrix_start_idx + i * N)) > 1e10){
+          counter++;
+        }
+        if(counter > 1){
+          // printf("[col check]Multi INF, NAN or Large Number detected in one column. (iter = %d)\n", i);
+          // return;
+        }
+      }
+      if(loc < N && loc >= 0 && counter ==1){
+        // printf("d1 > threshold.\n");
+        float sum = 0.0;
+        for(int i = 0; i < M_blk; i++) {
+          if (i != loc) {
+            sum +=	static_cast<float>(*(params.ref_D.data() + matrix_start_idx + i * N)); 
+          }
+        }
+        //correct the error
+        *(params.ref_D.data() + matrix_start_idx + loc * N) = static_cast<Dtype>(dA_col_1 - sum);
+      }
+      // printf("[col check]NAN detected (d1 = %.6f, d2 = %.6f, loc = %d) \n", (float)d1, (float)d2, loc);
+      // int error_smid = get_error_smid(params, col_idx, loc, SM_per_batch, init_batch_idx, batch_step);
+      // printf("[col check]NAN detected (d1 = %.6f, d2 = %.6f, loc = %d, col_idx: %d, batch: %d, error_smid: %d) \n", 
+      //                                 (float)d1, (float)d2, loc, col_idx, batch_idx, error_smid);
+      diff = 1;
+    }
+    
+    if(diff != 0){
+      // printf("Difference detected at SM %d. Reduced Sum: %d\n", smid, *(SM_check_res+smid));
+      // printf("Error detected at SM %d (%d) by checker SM %d (%d). Checksum SM %d (%d)\n",
+      //         target_smid, next_matrix_block_idx, smid, block_idx, chksum_smid, next_chk_block_idx);
+
+      int target_smid = *(Signature_Array + block_idx);
+      int chksum_smid = *(Signature_Array + (ChkColBlkOffset * M_shape));
+
+      // printf("Faulty SM: %d, Update SM: %d, Checker SM: %d\n", target_smid, chksum_smid, smid);
+
+      atomicAdd((SM_check_res + smid), diff);
+      atomicAdd((SM_check_res + target_smid), diff);
+      atomicAdd((SM_check_res + chksum_smid), diff);
+    }
+  }
+
+  // if(col_idx < N){
+  //   float recomputed_chksum = 0;
+  //   int diff = 0;
+
+  //   #pragma unroll
+  //   for(int r = 0; r < 128; r++){
+  //     int idx = matrix_start_idx + r * N;
+  //     recomputed_chksum += static_cast<float>(*(params.ref_D.data() + idx));
+  //     // float temp = params.ref_D.data(idx);
+  //   }
+
+  //   float updated_chksum = static_cast<float>(*(params.ref_D.data() + chk_start_idx));
+  //   float max = (recomputed_chksum > updated_chksum) ? recomputed_chksum : updated_chksum;
+  //   float rel_err = fabs(recomputed_chksum - updated_chksum) / max;
+
+  //   if(fabs(recomputed_chksum - updated_chksum) > (float)1e5){
+  //   //  if(rel_err > 0.01){
+  //     diff = 1;
+  //     // printf("Error detected at blk %d, col %d. recompute: %f, checksum: %f, diff: %f rel err: %f\n", 
+  //     //         block_idx, col_idx, recomputed_chksum, updated_chksum, fabs(recomputed_chksum - updated_chksum), rel_err);
+  //   }
+
+  //   if(diff != 0){
+  //     // printf("Difference detected at SM %d. Reduced Sum: %d\n", smid, *(SM_check_res+smid));
+  //     // printf("Error detected at SM %d (%d) by checker SM %d (%d). Checksum SM %d (%d)\n",
+  //     //         target_smid, next_matrix_block_idx, smid, block_idx, chksum_smid, next_chk_block_idx);
+
+  //     int target_smid = *(Signature_Array + block_idx);
+  //     int chksum_smid = *(Signature_Array + (ChkColBlkOffset * M_shape));
+
+  //     // printf("Faulty SM: %d, Update SM: %d, Checker SM: %d\n", target_smid, chksum_smid, smid);
+
+  //     atomicAdd((SM_check_res + smid), diff);
+  //     atomicAdd((SM_check_res + target_smid), diff);
+  //     atomicAdd((SM_check_res + chksum_smid), diff);
+  //   }
+  // }
+  __syncthreads();
+}
+
+template <typename Operator, typename Dtype>
+CUTLASS_GLOBAL
+void std_abft_bgemm(typename Operator::Params params, uint8_t *Signature_Array, int *SM_check_res, int num_sms){
+  unsigned int smid;
+  asm volatile("mov.u32 %0, %smid;" : "=r"(smid));
+
+  int M = params.problem_size.m() - 2;
+  int N = params.problem_size.n();
+
+  int col_idx = threadIdx.x;
+  int batch_idx = blockIdx.x;
+  int start_idx = (params.stride_D * batch_idx) + col_idx;
+
+  float E = 1e8;
+  int loc = -1;
+  float MAX = 0;
+  int diff = 0;
+
+  // recompute checksum (no weighted, weighted)
+  float dA_col_r1 = 0.f;
+  float dA_col_r2 = 0.f;
+ 
+  #pragma unroll 128
+  for(int r = 0; r < M; r++){
+    int idx = start_idx + r * N;
+    float element = static_cast<float>(*(params.ref_D.data() + idx));
+    
+    dA_col_r1 += element;
+    dA_col_r2 += static_cast<float>(r+1) * element;
+  }
+
+  // detect error
+  float dA_col_1 = static_cast<float>(*(params.ref_D.data() + start_idx + (M*N)));
+  float dA_col_2 = static_cast<float>(*(params.ref_D.data() + start_idx + (M+1)*N));
+
+  float d1 = (float)(dA_col_1 - dA_col_r1);
+  float d2 = (float)(dA_col_2 - dA_col_r2);
+  float abs_d1 = fabs(d1);
+
+  float max = (dA_col_1 > dA_col_r1) ? dA_col_1 : dA_col_r1;
+  float rel_err = abs_d1 / max;
+
+  if(abs_d1 > E){
+    // if(rel_err > 0.01){
+    if(!std::isinf(d2)){
+      loc = round(d2 / d1) - 1;
+      float max = (dA_col_1 > dA_col_r1) ? dA_col_1 : dA_col_r1;
+      float rel_err = abs_d1 / max;
+
+      // int error_smid = get_error_smid(params, col_idx, loc, SM_per_batch, init_batch_idx, batch_step);
+      // printf("[col check]error detected (d1 = %.6f, d2 = %.6f, loc = %d, col_idx: %d, batch: %d ,error_smid: %d) update(%f, %f) recompute(%f, %f), rel_err: %f\n", 
+      //                                   (float)d1, (float)d2, loc, col_idx, batch_idx, error_smid, dA_col_1, dA_col_2, dA_col_r1, dA_col_r2, rel_err);
+      // printf("[col check]error detected (d1 = %.6f, d2 = %.6f, loc = %d) update(%f, %f) recompute(%f, %f), rel_err: %f\n", (float)d1, (float)d2, loc, dA_col_1, dA_col_2, dA_col_r1, dA_col_r2, rel_err);
+      diff = 1;
+      if(loc < M && loc >= 0){
+        if(abs_d1 > (float)1e3){
+          // printf("d1 > threshold.\n");
+          float sum = 0.0;
+          for(int i = 0; i < M; i++) {
+            if (i != loc) {
+              sum +=	static_cast<float>(*(params.ref_D.data() + start_idx + i * N)); 
+            }
+          }
+          //correct the error
+          *(params.ref_D.data() + start_idx + loc * N) = static_cast<Dtype>(dA_col_1 - sum);
+        }
+        else{
+          // printf("d1 =< threshold.\n");
+          *(params.ref_D.data() + start_idx + loc * N) += static_cast<Dtype>(d1);
+        }
+      }
+    }
+    else{
+      MAX = 0;
+      int counter = 0;
+      for(int i = 0; i < M; i++) {
+        if(fabs((float)*(params.ref_D.data() + start_idx + i * N)) > MAX){
+          MAX = fabs((float)*(params.ref_D.data() + start_idx + i * N));
+          loc = i;
+        }
+        if(fabs((float)*(params.ref_D.data() + start_idx + i * N)) > 1e10){
+          counter++;
+          if(counter > 1){
+            // printf("[col check]col chksum error, more than one large number. (d1 = %.6f, d2 = %.6f)\n",(float)d1, (float)d2);
+            // return;
+          }
+        }
+      }
+      if(loc < M && loc >= 0 && counter ==1){
+        if(abs_d1 > (float)1e3){
+          // printf("d1 > threshold.\n");
+          float sum = 0.0;
+          for(int i = 0; i < M; i++) {
+            if (i != loc) {
+              sum +=	static_cast<float>(*(params.ref_D.data() + start_idx + i * N)); 
+            }
+          }
+          //correct the error
+          *(params.ref_D.data() + start_idx + loc * N) = static_cast<Dtype>(dA_col_1 - sum);
+        }
+        else{
+          // printf("d1 =< threshold.\n");
+          *(params.ref_D.data() + start_idx + loc * N) += static_cast<Dtype>(d1);
+        }
+      }
+      // int error_smid = get_error_smid(params, col_idx, loc, SM_per_batch, init_batch_idx, batch_step);
+      // printf("[col check]chk inf error detected (d1 = %.6f, d2 = %.6f, loc = %d, col_idx: %d, batch: %d, error_smid: %d) \n", 
+      //                                           (float)d1, (float)d2, loc, col_idx, batch_idx, error_smid);
+      // printf("[col check]chk inf error detected (d1 = %.6f, d2 = %.6f, loc = %d) \n", (float)d1, (float)d2, loc);
+      diff = 1;        
+    }
+    // return;
+  }
+  if(std::isinf(abs_d1)){
+    MAX = 0;
+    int64_t counter = 0;
+    for(int i = 0; i < M; i++) {
+      if(fabs((float)*(params.ref_D.data() + start_idx + i * N)) > MAX){
+        MAX = fabs((float)*(params.ref_D.data() + start_idx + i * N));
+        loc = i;
+      }
+      if(std::isinf(*(params.ref_D.data() + start_idx + i * N)) || fabs((float)*(params.ref_D.data() + start_idx + i * N)) > 1e10){
+        counter++;
+        if(counter > 1){
+          // printf("[col check]Multi INFs or Large Number detected in one column.(d1 = %.6f, d2 = %.6f, iter = %d)\n", (float)d1, (float)d2, i);
+          // return;
+        }
+      }
+    }
+    if(counter == 0){
+      // printf("[col chk]No INF or Large Number found.\n");
+      // return;
+    }
+    if(loc < M && loc >= 0 && counter ==1){
+      // printf("d1 > threshold.\n");
+      float sum = 0.0;
+      for(int i = 0; i < M; i++) {
+        if (i != loc) {
+          sum +=	static_cast<float>(*(params.ref_D.data() + start_idx + i * N)); 
+        }
+      }
+      //correct the error
+      *(params.ref_D.data() + start_idx + loc * N) = static_cast<Dtype>(dA_col_1 - sum);
+    }
+    // printf("[col check]INF detected (d1 = %.6f, d2 = %.6f, loc = %d) \n", (float)d1, (float)d2, loc);
+    
+    // int error_smid = get_error_smid(params, col_idx, loc, SM_per_batch, init_batch_idx, batch_step);
+    // printf("[col check]INF detected (d1 = %.6f, d2 = %.6f, loc = %d, col_idx: %d, batch: %d, error_smid: %d) \n", 
+    //                                 (float)d1, (float)d2, loc, col_idx, batch_idx, error_smid);
+    diff = 1;
+  }
+  // abs == nan
+  if(std::isnan(abs_d1)){
+    int64_t counter = 0;
+    for(int i = 0; i < M; i++) {
+      if (std::isnan(*(params.ref_D.data() + start_idx + i * N))) {
+        loc = i;
+        counter++;
+      }
+      if(std::isinf(*(params.ref_D.data() + start_idx + i * N))){
+        counter++;
+      }
+      if(fabs((float)*(params.ref_D.data() + start_idx + i * N)) > 1e10){
+        counter++;
+      }
+      if(counter > 1){
+        // printf("[col check]Multi INF, NAN or Large Number detected in one column. (iter = %d)\n", i);
+        // return;
+      }
+    }
+    if(loc < M && loc >= 0 && counter ==1){
+      // printf("d1 > threshold.\n");
+      float sum = 0.0;
+      for(int i = 0; i < M; i++) {
+        if (i != loc) {
+          sum +=	static_cast<float>(*(params.ref_D.data() + start_idx + i * N)); 
+        }
+      }
+      //correct the error
+      *(params.ref_D.data() + start_idx + loc * N) = static_cast<Dtype>(dA_col_1 - sum);
+    }
+    // printf("[col check]NAN detected (d1 = %.6f, d2 = %.6f, loc = %d) \n", (float)d1, (float)d2, loc);
+    // int error_smid = get_error_smid(params, col_idx, loc, SM_per_batch, init_batch_idx, batch_step);
+    // printf("[col check]NAN detected (d1 = %.6f, d2 = %.6f, loc = %d, col_idx: %d, batch: %d, error_smid: %d) \n", 
+    //                                 (float)d1, (float)d2, loc, col_idx, batch_idx, error_smid);
+    diff = 1;
+  }
+
+  if(diff != 0){
+    int faulty_blk_idx = loc / 128;
+      int batch_offset = batch_idx * (params.grid_tiled_shape.m() * params.grid_tiled_shape.n());
+
+      int target_smid = *(Signature_Array + batch_offset + faulty_blk_idx);
+      
+      int update_blk_idx = (col_idx / 256) * params.grid_tiled_shape.m();
+      int chksum_smid = *(Signature_Array + batch_offset + update_blk_idx);
+
+      // printf("Faulty SM: %d, Update SM: %d, Checker SM: %d\n", target_smid, chksum_smid, smid);
+    if(loc < M && loc >= 0){
+      atomicAdd((SM_check_res + smid), diff);
+      atomicAdd((SM_check_res + target_smid), diff);
+      atomicAdd((SM_check_res + chksum_smid), diff);
+    }
+    else{
+      atomicAdd((SM_check_res + num_sms), diff);
+      atomicAdd((SM_check_res + smid), diff);
+      atomicAdd((SM_check_res + chksum_smid), diff);
+    }
+  }
+} 
+
+template <typename Operator, typename Dtype>
+CUTLASS_GLOBAL
+void std_abft_bgemm_block(typename Operator::Params params, int checksumblk_per_col, uint8_t *Signature_Array, int *SM_check_res){ 
+  // int M = params.problem_size.m();
+  unsigned int smid;
+  asm volatile("mov.u32 %0, %smid;" : "=r"(smid));
+
+  int M_shape = params.grid_tiled_shape.m();
+  int N = params.problem_size.n();
+  int M_blk = 128;
+  
+  int batch_idx = blockIdx.x;
+  int block_idx = blockIdx.y;
+  int thread_idx = threadIdx.x;
+
+  if((block_idx % M_shape) == (M_shape - 1)){
+    return;
+  }
+
+  int MatrixColBlkOffset = block_idx / M_shape;
+  int MatrixRowBlkOffset = block_idx % M_shape;
+  int matrix_start_idx = (batch_idx * params.stride_D) + (MatrixColBlkOffset * blockDim.x) + (MatrixRowBlkOffset * 128) * N + thread_idx;
+
+  int ChkColBlkOffset = block_idx / M_shape;
+  int ChkRowBlkOffset = (M_shape - checksumblk_per_col);
+  int chk_start_idx = (batch_idx * params.stride_D) + (ChkColBlkOffset * blockDim.x) + (ChkRowBlkOffset * 128 + 2 * MatrixRowBlkOffset) * N + thread_idx;
+
+  int diff = 0;
+  float E = 1e5;
+  int loc = -1;
+  float MAX = 0;
+
+  if(thread_idx < N){
+    // recompute checksum (no weighted, weighted)
+    float dA_col_r1 = 0.f;
+    float dA_col_r2 = 0.f;
+
+    #pragma unroll 128
+    for(int r = 0; r < M_blk; r++){
+      int idx = matrix_start_idx + r * N;
+      float element = static_cast<float>(*(params.ref_D.data() + idx));
+      
+      dA_col_r1 += element;
+      dA_col_r2 += static_cast<float>(r+1) * element;
+    }
+
+    // detect error
+    float dA_col_1 = static_cast<float>(*(params.ref_D.data() + chk_start_idx));
+    float dA_col_2 = static_cast<float>(*(params.ref_D.data() + chk_start_idx + N));
+
+    float d1 = (float)(dA_col_1 - dA_col_r1);
+    float d2 = (float)(dA_col_2 - dA_col_r2);
+    float abs_d1 = fabs(d1);
+
+    if(abs_d1 > E){
+      // if(rel_err > 0.01){
+      if(!std::isinf(d2)){
+        loc = round(d2 / d1) - 1;
+        float max = (dA_col_1 > dA_col_r1) ? dA_col_1 : dA_col_r1;
+        float rel_err = abs_d1 / max;
+
+        // int error_smid = get_error_smid(params, col_idx, loc, SM_per_batch, init_batch_idx, batch_step);
+        // printf("[col check]error detected (d1 = %.6f, d2 = %.6f, loc = %d, col_idx: %d, batch: %d ,error_smid: %d) update(%f, %f) recompute(%f, %f), rel_err: %f\n", 
+        //                                   (float)d1, (float)d2, loc, col_idx, batch_idx, error_smid, dA_col_1, dA_col_2, dA_col_r1, dA_col_r2, rel_err);
+        // printf("[col check]error detected (d1 = %.6f, d2 = %.6f, loc = %d) update(%f, %f) recompute(%f, %f), rel_err: %f\n", (float)d1, (float)d2, loc, dA_col_1, dA_col_2, dA_col_r1, dA_col_r2, rel_err);
+        diff = 1;
+        if(loc < M_blk && loc >= 0){
+          if(abs_d1 > (float)1e3){
+            // printf("d1 > threshold.\n");
+            float sum = 0.0;
+            for(int i = 0; i < M_blk; i++) {
+              if (i != loc) {
+                sum +=	static_cast<float>(*(params.ref_D.data() + matrix_start_idx + i * N)); 
+              }
+            }
+            //correct the error
+            *(params.ref_D.data() + matrix_start_idx + loc * N) = static_cast<Dtype>(dA_col_1 - sum);
+          }
+          else{
+            // printf("d1 =< threshold.\n");
+            *(params.ref_D.data() + matrix_start_idx + loc * N) += static_cast<Dtype>(d1);
+          }
+        }
+      }
+      else{
+        MAX = 0;
+        int counter = 0;
+        for(int i = 0; i < M_blk; i++) {
+          if(fabs((float)*(params.ref_D.data() + matrix_start_idx + i * N)) > MAX){
+            MAX = fabs((float)*(params.ref_D.data() + matrix_start_idx + i * N));
+            loc = i;
+          }
+          if(fabs((float)*(params.ref_D.data() + matrix_start_idx + i * N)) > 1e10){
+            counter++;
+            if(counter > 1){
+              // printf("[col check]col chksum error, more than one large number. (d1 = %.6f, d2 = %.6f)\n",(float)d1, (float)d2);
+              // return;
+            }
+          }
+        }
+        if(loc < M_blk && loc >= 0 && counter ==1){
+          if(abs_d1 > (float)1e3){
+            // printf("d1 > threshold.\n");
+            float sum = 0.0;
+            for(int i = 0; i < M_blk; i++) {
+              if (i != loc) {
+                sum +=	static_cast<float>(*(params.ref_D.data() + matrix_start_idx + i * N)); 
+              }
+            }
+            //correct the error
+            *(params.ref_D.data() + matrix_start_idx + loc * N) = static_cast<Dtype>(dA_col_1 - sum);
+          }
+          else{
+            // printf("d1 =< threshold.\n");
+            *(params.ref_D.data() + matrix_start_idx + loc * N) += static_cast<Dtype>(d1);
+          }
+        }
+        // int error_smid = get_error_smid(params, col_idx, loc, SM_per_batch, init_batch_idx, batch_step);
+        // printf("[col check]chk inf error detected (d1 = %.6f, d2 = %.6f, loc = %d, col_idx: %d, batch: %d, error_smid: %d) \n", 
+        //                                           (float)d1, (float)d2, loc, col_idx, batch_idx, error_smid);
+        // printf("[col check]chk inf error detected (d1 = %.6f, d2 = %.6f, loc = %d) \n", (float)d1, (float)d2, loc);
+        diff = 1;        
+      }
+    // return;
+    }
+    if(std::isinf(abs_d1)){
+      MAX = 0;
+      int64_t counter = 0;
+      for(int i = 0; i < M_blk; i++) {
+        if(fabs((float)*(params.ref_D.data() + matrix_start_idx + i * N)) > MAX){
+          MAX = fabs((float)*(params.ref_D.data() + matrix_start_idx + i * N));
+          loc = i;
+        }
+        if(std::isinf(*(params.ref_D.data() + matrix_start_idx + i * N)) || fabs((float)*(params.ref_D.data() + matrix_start_idx + i * N)) > 1e10){
+          counter++;
+          if(counter > 1){
+            // printf("[col check]Multi INFs or Large Number detected in one column.(d1 = %.6f, d2 = %.6f, iter = %d)\n", (float)d1, (float)d2, i);
+            // return;
+          }
+        }
+      }
+      if(counter == 0){
+        // printf("[col chk]No INF or Large Number found.\n");
+        return;
+      }
+      if(loc < M_blk && loc >= 0 && counter == 1){
+        // printf("d1 > threshold.\n");
+        float sum = 0.0;
+        for(int i = 0; i < M_blk; i++) {
+          if (i != loc) {
+            sum +=	static_cast<float>(*(params.ref_D.data() + matrix_start_idx + i * N)); 
+          }
+        }
+        //correct the error
+        *(params.ref_D.data() + matrix_start_idx + loc * N) = static_cast<Dtype>(dA_col_1 - sum);
+      }
+      // printf("[col check]INF detected (d1 = %.6f, d2 = %.6f, loc = %d) \n", (float)d1, (float)d2, loc);
+      
+      // int error_smid = get_error_smid(params, col_idx, loc, SM_per_batch, init_batch_idx, batch_step);
+      // printf("[col check]INF detected (d1 = %.6f, d2 = %.6f, loc = %d, col_idx: %d, batch: %d, error_smid: %d) \n", 
+      //                                 (float)d1, (float)d2, loc, col_idx, batch_idx, error_smid);
+      diff = 1;
+    }
+    // abs == nan
+    if(std::isnan(abs_d1)){
+      int64_t counter = 0;
+      for(int i = 0; i < M_blk; i++) {
+        if (std::isnan(*(params.ref_D.data() + matrix_start_idx + i * N))) {
+          loc = i;
+          counter++;
+        }
+        if(std::isinf(*(params.ref_D.data() + matrix_start_idx + i * N))){
+          counter++;
+        }
+        if(fabs((float)*(params.ref_D.data() + matrix_start_idx + i * N)) > 1e10){
+          counter++;
+        }
+        if(counter > 1){
+          // printf("[col check]Multi INF, NAN or Large Number detected in one column. (iter = %d)\n", i);
+          // return;
+        }
+      }
+      if(loc < N && loc >= 0 && counter ==1){
+        // printf("d1 > threshold.\n");
+        float sum = 0.0;
+        for(int i = 0; i < M_blk; i++) {
+          if (i != loc) {
+            sum +=	static_cast<float>(*(params.ref_D.data() + matrix_start_idx + i * N)); 
+          }
+        }
+        //correct the error
+        *(params.ref_D.data() + matrix_start_idx + loc * N) = static_cast<Dtype>(dA_col_1 - sum);
+      }
+      // printf("[col check]NAN detected (d1 = %.6f, d2 = %.6f, loc = %d) \n", (float)d1, (float)d2, loc);
+      // int error_smid = get_error_smid(params, col_idx, loc, SM_per_batch, init_batch_idx, batch_step);
+      // printf("[col check]NAN detected (d1 = %.6f, d2 = %.6f, loc = %d, col_idx: %d, batch: %d, error_smid: %d) \n", 
+      //                                 (float)d1, (float)d2, loc, col_idx, batch_idx, error_smid);
+      diff = 1;
+    }
+    
+    // Atomic sum
+    if(diff != 0){
+      // printf("Difference detected at SM %d. Reduced Sum: %d\n", smid, *(SM_check_res+smid));
+      // printf("Error detected at SM %d (%d) by checker SM %d (%d). Checksum SM %d (%d)\n",
+      //         target_smid, next_matrix_block_idx, smid, block_idx, chksum_smid, next_chk_block_idx);
+      int batch_offset = batch_idx * (M_shape * params.grid_tiled_shape.n()); 
+      int target_smid = *(Signature_Array + batch_offset + block_idx);
+      int chksum_smid = *(Signature_Array + batch_offset + (ChkColBlkOffset * M_shape));
+
+      // printf("Faulty SM: %d, Update SM: %d, Checker SM: %d\n", target_smid, chksum_smid, smid);
+
+      atomicAdd((SM_check_res + smid), diff);
+      atomicAdd((SM_check_res + target_smid), diff);
+      atomicAdd((SM_check_res + chksum_smid), diff);
+    }
+  }
+
+  // if(thread_idx < N){
+  //   #pragma unroll
+  //   for(int r = 0; r < 128; r++){
+  //     int idx = matrix_start_idx + r * N;
+  //     recomputed_chksum += static_cast<float>(*(params.ref_D.data() + idx));
+  //     // float temp = params.ref_D.data(idx);
+  //   }
+    
+  //   float updated_chksum = static_cast<float>(*(params.ref_D.data() + chk_start_idx));
+    
+  //   float max = (recomputed_chksum > updated_chksum) ? recomputed_chksum : updated_chksum;
+  //   float rel_err = fabs(recomputed_chksum - updated_chksum) / max;
+
+  //   // if(fabs(recomputed_chksum - updated_chksum) > (float)1e5){
+  //   //   diff = 1;
+  //   //   // printf("Batch %d, Error detected at Block %d, Col(tid) %d. recompute: %f, checksum: %f, diff: %f rel err: %f\n", 
+  //   //   //         batch_idx, block_idx, thread_idx, recomputed_chksum, updated_chksum, fabs(recomputed_chksum - updated_chksum), rel_err);
+  //   // }
+
+  //   // Atomic sum
+  //   if(diff != 0){
+  //     // printf("Difference detected at SM %d. Reduced Sum: %d\n", smid, *(SM_check_res+smid));
+  //     // printf("Error detected at SM %d (%d) by checker SM %d (%d). Checksum SM %d (%d)\n",
+  //     //         target_smid, next_matrix_block_idx, smid, block_idx, chksum_smid, next_chk_block_idx);
+  //     int batch_offset = batch_idx * (M_shape * params.grid_tiled_shape.n()); 
+  //     int target_smid = *(Signature_Array + batch_offset + block_idx);
+  //     int chksum_smid = *(Signature_Array + batch_offset + (ChkColBlkOffset * M_shape));
+
+  //     // printf("Faulty SM: %d, Update SM: %d, Checker SM: %d\n", target_smid, chksum_smid, smid);
+
+  //     atomicAdd((SM_check_res + smid), diff);
+  //     atomicAdd((SM_check_res + target_smid), diff);
+  //     atomicAdd((SM_check_res + chksum_smid), diff);
+  //   }
+  // }
+  __syncthreads();
+}
+
 template<typename Operator>
 CUTLASS_DEVICE
 void check_phase_v3(typename Operator::Params params, int batch_idx, int col_idx, int *SM_check_res, int matrix_SM, int batch_step, int &diff, int &loc){
@@ -1866,7 +2810,6 @@ void check_phase_v3(typename Operator::Params params, int batch_idx, int col_idx
     return;
   }
 }
-
 
 template <typename Operator>
 CUTLASS_GLOBAL
