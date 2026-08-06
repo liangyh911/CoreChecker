@@ -41,7 +41,7 @@ def clean_SM_check_logs(gpu):
     job_id = os.getenv('SLURM_JOB_ID')
     Detection_Result_Log = f"./control_{job_id}/{gpu}/SM_checking_results.txt"
     with open(Detection_Result_Log, 'w') as file:
-            file.truncate(0)
+        file.truncate(0)
 
 def find_faulty_smid(gpu):
     job_id = os.getenv('SLURM_JOB_ID')
@@ -67,13 +67,13 @@ def find_faulty_smid(gpu):
         max_val = max(fault_detection_res)
         if fault_detection_res.count(max_val) == 1:
             faulty_smid = fault_detection_res.index(max_val)
-            print(f"python: faulty_smid: {faulty_smid}")
+            # print(f"python: faulty_smid: {faulty_smid}")
             
             with open(Banned_SMID_Log, 'w') as file:
                 file.write(str(faulty_smid))
             
             with open(logFP, 'a') as file:
-                file.write(f"{faulty_smid}\n")
+                file.write(f"{faulty_smid} ")
     
             with open(Detection_Result_Log, 'w') as file:
                 file.truncate(0)

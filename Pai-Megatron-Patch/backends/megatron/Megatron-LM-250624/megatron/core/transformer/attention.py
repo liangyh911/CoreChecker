@@ -118,13 +118,13 @@ def find_faulty_smid(gpu):
         max_val = max(fault_detection_res)
         if fault_detection_res.count(max_val) == 1:
             faulty_smid = fault_detection_res.index(max_val)
-            print(f"python: faulty_smid: {faulty_smid}")
+            # print(f"python: faulty_smid: {faulty_smid}")
             
             with open(Banned_SMID_Log, 'w') as file:
                 file.write(str(faulty_smid))
             
             with open(logFP, 'a') as file:
-                file.write(f"{faulty_smid}\n")
+                file.write(f"{faulty_smid} ")
     
             with open(Detection_Result_Log, 'w') as file:
                 file.truncate(0)
@@ -645,8 +645,8 @@ class Attention(MegatronModule, ABC):
 
         """
 
-        torch.cuda.synchronize()
-        start_time = time.time()
+        # torch.cuda.synchronize()
+        # start_time = time.time()
 
         # Check if we need to skip RoPE
         # no_rope is 0-indexed array and self.layer_number is 1-indexed
@@ -968,11 +968,11 @@ class Attention(MegatronModule, ABC):
         if Val_Range:
             record_value_range(output, "WO", gpu)
         
-        torch.cuda.synchronize()
-        elapsed_time = time.time() - start_time
+        # torch.cuda.synchronize()
+        # elapsed_time = time.time() - start_time
 
-        with open(f"./control_{job_id}/{gpu}/time/attn.txt", "a") as file:
-            file.write(f"{elapsed_time}\n")
+        # with open(f"./control_{job_id}/{gpu}/time/attn.txt", "a") as file:
+        #     file.write(f"{elapsed_time}\n")
 
 
         # if get_tensor_model_parallel_rank() == 0:

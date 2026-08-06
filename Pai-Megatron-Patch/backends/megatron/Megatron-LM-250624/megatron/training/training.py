@@ -2092,6 +2092,7 @@ def checkpoint_and_decide_exit(
             target_loss = 0.8916453719139099
             # === 这里改用了 synced_ema ===
             if synced_ema <= target_loss and iteration >= target_iteration:
+            # if iteration >= target_iteration:
                 local_should_exit = 1
                 # 打印信息里最好带上 EMA 值，方便确认
                 exit_message = f'EMA Loss ({synced_ema}) reached target, exiting at iteration {iteration}'
@@ -2124,7 +2125,7 @@ def checkpoint_and_decide_exit(
         if torch.distributed.get_rank() == 0:
             logFP = f"./control_{job_id}/eval_results.txt"
             with open(logFP, "a") as file:
-                file.write(f"{iteration}\n")
+                file.write(f"\n{iteration}\n")
 
         return True
     
@@ -2406,6 +2407,8 @@ def train(
     SMChkFP = f"./control_{job_id}/{gpu}/split.txt"
 
     enable_core_checker = False
+    enable_std_abft = False
+    enable_blk_abft = False
 
     core_checker_freq = 1
     with open(Adaptive_Freq, 'r') as file:
@@ -2415,9 +2418,11 @@ def train(
         flag = file.read()
         if flag == 't':
             enable_core_checker = True
-        else:
-            enable_core_checker = False
-    
+        elif flag == 's':
+            enable_std_abft = True
+        elif flag == 'a':
+            enable_blk_abft = True
+
     with open(FIFP, "w") as file:
         file.truncate(0)
         file.write('f')
@@ -2453,6 +2458,8 @@ def train(
         print(f"current gpu: {gpu}, faulty gpu: {faulty_GPU}, init iteration: {iteration}")
         perform_FI = True
     FI_step = 1
+
+    # check_freq_list = [5, 5, 7, 11, 23, 63, 100, 100, 100, 100]
 
     # print(f"current gpu: {gpu}, faulty gpu: {faulty_GPU}, init iteration: {iteration}")
     # 
@@ -2509,10 +2516,26 @@ def train(
         args.curr_iteration = iteration
         ft_integration.on_training_step_start()
 
-        if (enable_core_checker) and (iteration % core_checker_freq == 0):
+        # more frequency checking during earlier training steps
+        # check_list_idx = iteration // 50
+        # if check_list_idx < len(check_freq_list):
+        #     core_checker_freq = check_freq_list[check_list_idx]
+        # else:
+        #     core_checker_freq = 100
+
+        perform_detection = (iteration % core_checker_freq == 0)
+        if (enable_core_checker) and perform_detection:
             with open(SMChkFP, 'w') as file:
                 file.truncate(0)
                 file.write('t')
+        elif enable_std_abft and perform_detection:
+            with open(SMChkFP, 'w') as file:
+                file.truncate(0)
+                file.write('s')
+        elif enable_blk_abft and perform_detection:
+            with open(SMChkFP, 'w') as file:
+                file.truncate(0)
+                file.write('a')
         else:
             with open(SMChkFP, 'w') as file:
                 file.truncate(0)
